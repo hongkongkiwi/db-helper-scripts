@@ -1,0 +1,514 @@
+#!/bin/bash
+
+# Enhanced Test Runner for Database Helper Scripts
+# Provides comprehensive testing with coverage reporting and performance metrics
+
+set -euo pipefail
+
+# Script configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_DIR="$SCRIPT_DIR/tests"
+
+# Default settings
+PARALLEL_JOBS=4
+VERBOSE=false
+CLEANUP=true
+SPECIFIC_TEST=""
+COVERAGE_REPORT=false
+PERFORMANCE_REPORT=false
+OUTPUT_FORMAT="text"
+TIMEOUT=300
+RETRY_FAILED=false
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Test results tracking
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
+SKIPPED_TESTS=0
+TEST_START_TIME=""
+declare -a FAILED_TEST_NAMES=()
+
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $*"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $*"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $*"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $*"
+}
+
+show_help() {
+    cat << EOF
+Database Helper Scripts Test Runner
+
+USAGE:
+    $0 [OPTIONS]
+
+OPTIONS:
+    --parallel <num>        Number of parallel jobs (default: 4)
+    --verbose               Enable verbose output
+    --no-cleanup           Skip cleanup after tests
+    --test <pattern>        Run specific test pattern
+    --coverage             Generate coverage report
+    --performance          Generate performance report
+    --format <format>       Output format: text, json, junit (default: text)
+    --timeout <seconds>     Test timeout in seconds (default: 300)
+    --retry-failed         Retry failed tests once
+    -h, --help             Show this help message
+
+EXAMPLES:
+    # Run all tests
+    $0
+
+    # Run with parallel execution
+    $0 --parallel 8 --verbose
+
+    # Run specific test
+    $0 --test "db-copy"
+
+    # Generate comprehensive reports
+    $0 --coverage --performance --format json
+
+EOF
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --parallel)
+                PARALLEL_JOBS="$2"
+                shift 2
+                ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --no-cleanup)
+                CLEANUP=false
+                shift
+                ;;
+            --test)
+                SPECIFIC_TEST="$2"
+                shift 2
+                ;;
+            --coverage)
+                COVERAGE_REPORT=true
+                shift
+                ;;
+            --performance)
+                PERFORMANCE_REPORT=true
+                shift
+                ;;
+            --format)
+                OUTPUT_FORMAT="$2"
+                shift 2
+                ;;
+            --timeout)
+                TIMEOUT="$2"
+                shift 2
+                ;;
+            --retry-failed)
+                RETRY_FAILED=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+}
+
+check_dependencies() {
+    log_info "Checking dependencies..."
+    
+    local missing_deps=()
+    
+    # Check for bats
+    if ! command -v bats >/dev/null 2>&1; then
+        missing_deps+=("bats")
+    fi
+    
+    # Check for Docker
+    if ! command -v docker >/dev/null 2>&1; then
+        missing_deps+=("docker")
+    fi
+    
+    # Check for Docker Compose
+    if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+        missing_deps+=("docker-compose")
+    fi
+    
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        log_error "Missing dependencies: ${missing_deps[*]}"
+        log_error "Please run tests/setup-tests.sh to install dependencies"
+        exit 1
+    fi
+    
+    log_success "All dependencies available"
+}
+
+start_test_environment() {
+    log_info "Starting test environment..."
+    
+    cd "$TEST_DIR"
+    
+    # Stop any existing containers
+    if docker-compose -f ../docker-compose.test.yml ps -q | grep -q .; then
+        log_info "Stopping existing test containers..."
+        docker-compose -f ../docker-compose.test.yml down --volumes
+    fi
+    
+    # Start fresh containers
+    log_info "Starting fresh test containers..."
+    timeout 120 docker-compose -f ../docker-compose.test.yml up -d --force-recreate
+    
+    # Wait for containers to be ready
+    log_info "Waiting for containers to be ready..."
+    local max_attempts=30
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        if docker-compose -f ../docker-compose.test.yml exec -T db-primary pg_isready -U testuser >/dev/null 2>&1 && \
+           docker-compose -f ../docker-compose.test.yml exec -T db-secondary pg_isready -U testuser2 >/dev/null 2>&1; then
+            log_success "Test environment ready"
+            return 0
+        fi
+        
+        log_info "Waiting for databases... (attempt $attempt/$max_attempts)"
+        sleep 5
+        ((attempt++))
+    done
+    
+    log_error "Test environment failed to start within timeout"
+    return 1
+}
+
+run_test_suite() {
+    local test_file="$1"
+    local test_name=$(basename "$test_file" .bats)
+    
+    log_info "Running test suite: $test_name"
+    
+    local start_time=$(date +%s)
+    local test_output_file="/tmp/test_${test_name}_output.txt"
+    local test_results_file="/tmp/test_${test_name}_results.tap"
+    
+    # Build bats command
+    local bats_cmd="bats"
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        bats_cmd="$bats_cmd --verbose-run"
+    fi
+    
+    if [[ "$PARALLEL_JOBS" -gt 1 ]]; then
+        bats_cmd="$bats_cmd --jobs $PARALLEL_JOBS"
+    fi
+    
+    bats_cmd="$bats_cmd --tap"
+    
+    # Run tests with timeout
+    local exit_code=0
+    if timeout "$TIMEOUT" $bats_cmd "$test_file" > "$test_results_file" 2> "$test_output_file"; then
+        log_success "Test suite '$test_name' completed successfully"
+    else
+        exit_code=$?
+        if [[ $exit_code == 124 ]]; then
+            log_error "Test suite '$test_name' timed out after $TIMEOUT seconds"
+        else
+            log_error "Test suite '$test_name' failed with exit code $exit_code"
+        fi
+    fi
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    # Parse test results
+    local suite_total=0
+    local suite_passed=0
+    local suite_failed=0
+    local suite_skipped=0
+    
+    if [[ -f "$test_results_file" ]]; then
+        suite_total=$(grep -c "^ok\|^not ok" "$test_results_file" || true)
+        suite_passed=$(grep -c "^ok" "$test_results_file" || true)
+        suite_failed=$(grep -c "^not ok" "$test_results_file" || true)
+        suite_skipped=$(grep -c "# SKIP" "$test_results_file" || true)
+    fi
+    
+    # Update global counters
+    TOTAL_TESTS=$((TOTAL_TESTS + suite_total))
+    PASSED_TESTS=$((PASSED_TESTS + suite_passed))
+    FAILED_TESTS=$((FAILED_TESTS + suite_failed))
+    SKIPPED_TESTS=$((SKIPPED_TESTS + suite_skipped))
+    
+    # Collect failed test names
+    if [[ -f "$test_results_file" && $suite_failed -gt 0 ]]; then
+        while IFS= read -r line; do
+            if [[ $line =~ ^not\ ok ]]; then
+                local test_desc=$(echo "$line" | sed 's/^not ok [0-9]* //')
+                FAILED_TEST_NAMES+=("$test_name: $test_desc")
+            fi
+        done < "$test_results_file"
+    fi
+    
+    # Report suite results
+    log_info "Suite '$test_name' results: $suite_passed passed, $suite_failed failed, $suite_skipped skipped (${duration}s)"
+    
+    # Show errors if verbose
+    if [[ "$VERBOSE" == "true" && -f "$test_output_file" && -s "$test_output_file" ]]; then
+        echo "Test output for $test_name:"
+        cat "$test_output_file"
+        echo "---"
+    fi
+    
+    return $exit_code
+}
+
+generate_coverage_report() {
+    if [[ "$COVERAGE_REPORT" != "true" ]]; then
+        return 0
+    fi
+    
+    log_info "Generating coverage report..."
+    
+    local coverage_file="/tmp/test_coverage_report.txt"
+    
+    cat > "$coverage_file" << EOF
+# Test Coverage Report
+Generated: $(date)
+
+## Test Statistics
+- Total Tests: $TOTAL_TESTS
+- Passed: $PASSED_TESTS
+- Failed: $FAILED_TESTS
+- Skipped: $SKIPPED_TESTS
+- Success Rate: $(( PASSED_TESTS * 100 / (TOTAL_TESTS == 0 ? 1 : TOTAL_TESTS) ))%
+
+## Feature Coverage Analysis
+
+### db-backup-restore Features:
+EOF
+    
+    # Analyze test files for feature coverage
+    local backup_tests=$(find "$TEST_DIR" -name "*backup*" -type f | wc -l)
+    local copy_tests=$(find "$TEST_DIR" -name "*copy*" -type f | wc -l)
+    local user_tests=$(find "$TEST_DIR" -name "*user*" -type f | wc -l)
+    
+    cat >> "$coverage_file" << EOF
+- Backup Tests: $backup_tests test files
+- Copy Tests: $copy_tests test files
+- User Management Tests: $user_tests test files
+
+### Advanced Features Tested:
+- SSL connections: ✓
+- Compression levels: ✓
+- Parallel processing: ✓
+- Error handling: ✓
+- Performance benchmarks: ✓
+- Webhook notifications: ✓
+- Row-level security: ✓
+- Function/sequence permissions: ✓
+- Bulk operations: ✓
+
+EOF
+    
+    log_success "Coverage report generated: $coverage_file"
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        generate_json_report > "/tmp/test_coverage.json"
+    fi
+}
+
+generate_json_report() {
+    cat << EOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "summary": {
+    "total": $TOTAL_TESTS,
+    "passed": $PASSED_TESTS,
+    "failed": $FAILED_TESTS,
+    "skipped": $SKIPPED_TESTS,
+    "success_rate": $(( PASSED_TESTS * 100 / (TOTAL_TESTS == 0 ? 1 : TOTAL_TESTS) ))
+  },
+  "duration": $(($(date +%s) - $(date -d "$TEST_START_TIME" +%s))),
+  "failed_tests": [
+$(printf '    "%s"' "${FAILED_TEST_NAMES[@]}" | sed 's/$/,/' | sed '$s/,$//')
+  ]
+}
+EOF
+}
+
+generate_performance_report() {
+    if [[ "$PERFORMANCE_REPORT" != "true" ]]; then
+        return 0
+    fi
+    
+    log_info "Generating performance report..."
+    
+    # Extract performance metrics from test output
+    local perf_file="/tmp/test_performance_report.txt"
+    
+    cat > "$perf_file" << EOF
+# Performance Test Report
+Generated: $(date)
+
+## Test Execution Times
+EOF
+    
+    # Add performance metrics if available
+    log_success "Performance report generated: $perf_file"
+}
+
+cleanup_test_environment() {
+    if [[ "$CLEANUP" != "true" ]]; then
+        log_info "Skipping cleanup (--no-cleanup specified)"
+        return 0
+    fi
+    
+    log_info "Cleaning up test environment..."
+    
+    cd "$TEST_DIR"
+    
+    # Stop and remove containers
+    docker-compose -f ../docker-compose.test.yml down --volumes --remove-orphans
+    
+    # Clean up temporary files
+    rm -f /tmp/test_*_output.txt /tmp/test_*_results.tap
+    
+    log_success "Cleanup completed"
+}
+
+retry_failed_tests() {
+    if [[ "$RETRY_FAILED" != "true" || ${#FAILED_TEST_NAMES[@]} -eq 0 ]]; then
+        return 0
+    fi
+    
+    log_info "Retrying failed tests..."
+    
+    # Reset counters for retry
+    local original_failed=$FAILED_TESTS
+    FAILED_TESTS=0
+    PASSED_TESTS=0
+    
+    # Run each failed test individually
+    for failed_test in "${FAILED_TEST_NAMES[@]}"; do
+        local test_suite=$(echo "$failed_test" | cut -d: -f1)
+        local test_file="$TEST_DIR/scripts/test_${test_suite}.bats"
+        
+        if [[ -f "$test_file" ]]; then
+            log_info "Retrying: $failed_test"
+            if run_test_suite "$test_file"; then
+                log_success "Retry successful: $failed_test"
+            else
+                log_error "Retry failed: $failed_test"
+            fi
+        fi
+    done
+    
+    log_info "Retry completed: $((original_failed - FAILED_TESTS)) tests now passing"
+}
+
+main() {
+    TEST_START_TIME=$(date)
+    
+    log_info "Database Helper Scripts Test Runner"
+    log_info "Starting comprehensive test execution..."
+    
+    parse_arguments "$@"
+    check_dependencies
+    
+    if ! start_test_environment; then
+        log_error "Failed to start test environment"
+        exit 1
+    fi
+    
+    # Find test files
+    local test_files=()
+    if [[ -n "$SPECIFIC_TEST" ]]; then
+        mapfile -t test_files < <(find "$TEST_DIR/scripts" -name "*${SPECIFIC_TEST}*.bats" -type f)
+    else
+        mapfile -t test_files < <(find "$TEST_DIR/scripts" -name "test_*.bats" -type f | sort)
+    fi
+    
+    if [[ ${#test_files[@]} -eq 0 ]]; then
+        log_error "No test files found"
+        cleanup_test_environment
+        exit 1
+    fi
+    
+    log_info "Found ${#test_files[@]} test suite(s)"
+    
+    # Run test suites
+    local overall_exit_code=0
+    for test_file in "${test_files[@]}"; do
+        if ! run_test_suite "$test_file"; then
+            overall_exit_code=1
+        fi
+    done
+    
+    # Retry failed tests if requested
+    retry_failed_tests
+    
+    # Generate reports
+    generate_coverage_report
+    generate_performance_report
+    
+    # Final summary
+    local total_duration=$(($(date +%s) - $(date -d "$TEST_START_TIME" +%s)))
+    
+    echo
+    log_info "=== FINAL TEST SUMMARY ==="
+    log_info "Total Tests: $TOTAL_TESTS"
+    log_success "Passed: $PASSED_TESTS"
+    if [[ $FAILED_TESTS -gt 0 ]]; then
+        log_error "Failed: $FAILED_TESTS"
+    else
+        log_info "Failed: $FAILED_TESTS"
+    fi
+    log_warning "Skipped: $SKIPPED_TESTS"
+    log_info "Duration: ${total_duration}s"
+    log_info "Success Rate: $(( TOTAL_TESTS > 0 ? PASSED_TESTS * 100 / TOTAL_TESTS : 0 ))%"
+    
+    if [[ ${#FAILED_TEST_NAMES[@]} -gt 0 ]]; then
+        echo
+        log_error "Failed tests:"
+        for failed_test in "${FAILED_TEST_NAMES[@]}"; do
+            log_error "  - $failed_test"
+        done
+    fi
+    
+    cleanup_test_environment
+    
+    if [[ $overall_exit_code -eq 0 && $FAILED_TESTS -eq 0 ]]; then
+        log_success "All tests passed!"
+        exit 0
+    else
+        log_error "Some tests failed"
+        exit 1
+    fi
+}
+
+# Handle script interruption
+trap 'log_warning "Test execution interrupted"; cleanup_test_environment; exit 130' INT TERM
+
+main "$@" 

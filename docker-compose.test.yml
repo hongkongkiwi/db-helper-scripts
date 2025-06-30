@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # Primary PostgreSQL instance for main testing
+  postgres-primary:
+    image: postgres:15
+    container_name: db-test-primary
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_primary_data:/var/lib/postgresql/data
+      - ./tests/fixtures:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-test-network
+
+  # Secondary PostgreSQL instance for cross-server testing
+  postgres-secondary:
+    image: postgres:15
+    container_name: db-test-secondary
+    environment:
+      POSTGRES_DB: testdb2
+      POSTGRES_USER: testuser2
+      POSTGRES_PASSWORD: testpass2
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_secondary_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser2 -d testdb2"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-test-network
+
+  # Test runner container with bats and all dependencies
+  test-runner:
+    image: postgres:15
+    container_name: db-test-runner
+    environment:
+      PGHOST_PRIMARY: postgres-primary
+      PGPORT_PRIMARY: 5432
+      PGUSER_PRIMARY: testuser
+      PGPASSWORD_PRIMARY: testpass
+      PGDATABASE_PRIMARY: testdb
+      
+      PGHOST_SECONDARY: postgres-secondary
+      PGPORT_SECONDARY: 5432
+      PGUSER_SECONDARY: testuser2
+      PGPASSWORD_SECONDARY: testpass2
+      PGDATABASE_SECONDARY: testdb2
+    volumes:
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      postgres-secondary:
+        condition: service_healthy
+    networks:
+      - db-test-network
+    command: tail -f /dev/null  # Keep container running
+
+volumes:
+  postgres_primary_data:
+  postgres_secondary_data:
+
+networks:
+  db-test-network:
+    driver: bridge 

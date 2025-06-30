@@ -1152,6 +1152,92 @@ cmd_copy() {
         exit $EXIT_GENERAL_ERROR
     fi
     
+    # Critical validation: Check for same server AND same database name
+    if is_same_server "$SRC_DB_HOST" "$SRC_DB_PORT" "$TARGET_DB_HOST" "$TARGET_DB_PORT"; then
+        if [[ "$SRC_DB_NAME" == "$TARGET_DB_NAME" ]]; then
+            log_error "Cannot copy database to itself! Source and target database names must be different when copying on the same server"
+            log_error "Source: $SRC_DB_NAME on $SRC_DB_HOST:$SRC_DB_PORT"
+            log_error "Target: $TARGET_DB_NAME on $TARGET_DB_HOST:$TARGET_DB_PORT"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        log_verbose "Same-server copy detected: '$SRC_DB_NAME' -> '$TARGET_DB_NAME'"
+    fi
+    
+    # Validate template copy requirements
+    if [[ "$USE_TEMPLATE_COPY" == "true" ]]; then
+        if ! is_same_server "$SRC_DB_HOST" "$SRC_DB_PORT" "$TARGET_DB_HOST" "$TARGET_DB_PORT"; then
+            log_error "Template-based copy (--fast) requires source and target to be on the same server"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        
+        if [[ "$SCHEMA_ONLY" == "true" || "$DATA_ONLY" == "true" ]]; then
+            log_warning "Template copy doesn't support --schema-only or --data-only. Using standard dump/restore method"
+            USE_TEMPLATE_COPY=false
+        fi
+        
+        if [[ ${#INCLUDE_TABLES[@]} -gt 0 || ${#EXCLUDE_TABLES[@]} -gt 0 ]]; then
+            log_warning "Template copy doesn't support table filtering. Using standard dump/restore method"
+            USE_TEMPLATE_COPY=false
+        fi
+    fi
+    
+    # Validate sync mode requirements
+    if [[ "$SYNC_MODE" == "true" ]]; then
+        if [[ "$DROP_TARGET" == "true" ]]; then
+            log_error "Cannot use --sync with --drop-target (sync requires existing target database)"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        
+        if [[ "$CREATE_TARGET" == "false" ]]; then
+            log_warning "Sync mode assumes target database exists (--no-create-target is redundant)"
+        fi
+    fi
+    
+    # Validate performance optimization combinations
+    if [[ "$DISABLE_TRIGGERS" == "true" && "$SCHEMA_ONLY" == "true" ]]; then
+        log_warning "Disabling triggers is not applicable for schema-only copies"
+    fi
+    
+    if [[ "$DISABLE_INDEXES" == "true" && "$SCHEMA_ONLY" == "true" ]]; then
+        log_warning "Disabling indexes is not applicable for schema-only copies"
+    fi
+    
+    if [[ "$TRUNCATE_TABLES" == "true" && "$SYNC_MODE" != "true" ]]; then
+        log_error "Table truncation (--truncate-tables) can only be used with sync mode (--sync)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    # Validate SSL configuration
+    if [[ -n "$SSL_CERT" && ! -f "$SSL_CERT" ]]; then
+        log_error "SSL certificate file not found: $SSL_CERT"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    if [[ -n "$SSL_KEY" && ! -f "$SSL_KEY" ]]; then
+        log_error "SSL key file not found: $SSL_KEY"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    if [[ -n "$SSL_CA" && ! -f "$SSL_CA" ]]; then
+        log_error "SSL CA certificate file not found: $SSL_CA"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    # Validate memory settings format
+    if [[ -n "$MAINTENANCE_WORK_MEM" ]]; then
+        if ! [[ "$MAINTENANCE_WORK_MEM" =~ ^[0-9]+[kKmMgG]?[bB]?$ ]]; then
+            log_error "Invalid maintenance_work_mem format: $MAINTENANCE_WORK_MEM (use format like '256MB', '1GB')"
+            exit $EXIT_GENERAL_ERROR
+        fi
+    fi
+    
+    if [[ -n "$WORK_MEM" ]]; then
+        if ! [[ "$WORK_MEM" =~ ^[0-9]+[kKmMgG]?[bB]?$ ]]; then
+            log_error "Invalid work_mem format: $WORK_MEM (use format like '64MB', '1GB')"
+            exit $EXIT_GENERAL_ERROR
+        fi
+    fi
+    
     # Build connection strings
     local src_conn=$(build_connection_string "$SRC_DB_HOST" "$SRC_DB_PORT" "$SRC_DB_USER" "$SRC_DB_NAME" "$SRC_DB_PASSWORD")
     local target_conn=$(build_connection_string "$TARGET_DB_HOST" "$TARGET_DB_PORT" "$TARGET_DB_USER" "$TARGET_DB_NAME" "$TARGET_DB_PASSWORD")
@@ -1290,33 +1376,42 @@ PROGRESS AND LOGGING OPTIONS:
     -h, --help               Show this help message
 
 EXAMPLES:
-    # Copy database on same server
-    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_copy
+    # Fast copy on same server (instant using template)
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_copy --fast
 
-    # Copy between different servers
+    # Sync existing database with source (incremental update)
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname existing_db --sync
+
+    # High-performance copy with optimizations
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_copy \\
+        --optimize-performance --disable-triggers --jobs 8 --maintenance-work-mem 512MB
+
+    # Copy between different servers with SSL
     $SCRIPT_NAME copy \\
         --src-host prod.example.com --src-user postgres --src-dbname myapp \\
-        --target-host staging.example.com --target-user postgres --target-dbname myapp_staging
+        --target-host staging.example.com --target-user postgres --target-dbname myapp_staging \\
+        --sslmode require
 
     # Copy schema only with extensions
     $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_schema \\
         --schema-only --include-extensions
 
-    # Copy specific tables only
+    # Copy specific tables with validation
     $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_partial \\
-        --include-table users --include-table orders --include-table products
+        --include-table users --include-table orders --include-table products --validate
 
-    # Copy excluding temporary data
+    # Copy excluding temporary data with progress monitoring
     $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_clean \\
-        --exclude-table temp_* --exclude-table cache_* --exclude-table session_*
+        --exclude-table temp_* --exclude-table cache_* --exclude-table session_* \\
+        --progress --verbose
 
-    # Copy with parallel processing and validation
-    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_copy \\
-        --jobs 4 --validate --progress
-
-    # Replace existing target database
+    # Replace existing target database with confirmation skip
     $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname existing_db \\
         --drop-target --skip-confirmation
+
+    # Sync with comprehensive validation and logging
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname existing_copy \\
+        --sync --validate --log-file sync.log --verbose
 
 EXIT CODES:
     0  - Success

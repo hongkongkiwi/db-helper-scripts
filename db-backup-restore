@@ -2238,6 +2238,40 @@ cmd_backup() {
         exit $EXIT_GENERAL_ERROR
     fi
     local db_name=$(parse_database_url "$DATABASE_URL")
+    
+    # Critical validation: Prevent backing up system databases unless forced
+    local system_databases=("template0" "template1" "postgres")
+    for sysdb in "${system_databases[@]}"; do
+        if [[ "$db_name" == "$sysdb" ]]; then
+            log_warning "Backing up system database: $db_name"
+            if [[ "$FORCE" != "true" ]]; then
+                read -p "Are you sure you want to backup the system database '$db_name'? (y/N): " -r
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    log_info "Backup cancelled by user"
+                    exit $EXIT_SUCCESS
+                fi
+            fi
+        fi
+    done
+    
+    # Validate backup directory permissions
+    if [[ ! -w "$backup_dir" ]]; then
+        log_error "Backup directory is not writable: $backup_dir"
+        log_error "Please check directory permissions or specify a different directory with -D"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    # Check for conflicting options
+    if [[ "$format" == "plain" && "$compression" != "none" && "$compression" != "gzip" ]]; then
+        log_warning "Plain format backup only supports gzip compression, ignoring $compression"
+        compression="gzip"
+    fi
+    
+    # Validate parallel options
+    if [[ "$PARALLEL_JOBS" -gt 1 && "$format" == "plain" ]]; then
+        log_warning "Parallel processing not supported with plain format, using single job"
+        PARALLEL_JOBS=1
+    fi
 
     # Save configuration if requested
     if [[ -n "$SAVE_CONFIG" ]]; then
