@@ -205,130 +205,51 @@ tasks:
     silent: true
 
   release:patch:
-    desc: Create a patch release (increment patch version)
+    desc: Create a patch release (auto-increment from latest git tag)
+    deps:
+      - release:check
     cmds:
-      - task: release:check
-      - |
-        CURRENT_VERSION=$(task release:current)
-        echo "Current version: v$CURRENT_VERSION"
-
-        # Parse version components
-        MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
-        MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
-        PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
-
-        # Increment patch version
-        NEW_PATCH=$((PATCH + 1))
-        NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
-
-        echo "New patch version: v$NEW_VERSION"
-        echo ""
-        echo "This will:"
-        echo "  1. Create and push tag v$NEW_VERSION"
-        echo "  2. Trigger GitHub Actions to create the release"
-        echo "  3. Automatically update script versions"
-        echo ""
-        read -p "Continue with patch release? (y/N): " confirm
-        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-          echo "Release cancelled"
-          exit 1
-        fi
-
-        echo "Creating patch release v$NEW_VERSION..."
-        git tag -a "v$NEW_VERSION" -m "Patch release v$NEW_VERSION"
-        git push origin "v$NEW_VERSION"
-        echo "✅ Patch release tag v$NEW_VERSION pushed!"
-        echo "🚀 Check GitHub Actions: https://github.com/{{.GITHUB_REPO}}/actions"
+      - ./release patch
 
   release:minor:
-    desc: Create a minor release (increment minor version)
+    desc: Create a minor release (auto-increment from latest git tag)
+    deps:
+      - release:check
     cmds:
-      - task: release:check
-      - |
-        CURRENT_VERSION=$(task release:current)
-        echo "Current version: v$CURRENT_VERSION"
-
-        # Parse version components
-        MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
-        MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
-
-        # Increment minor version, reset patch to 0
-        NEW_MINOR=$((MINOR + 1))
-        NEW_VERSION="$MAJOR.$NEW_MINOR.0"
-
-        echo "New minor version: v$NEW_VERSION"
-        echo ""
-        echo "This will:"
-        echo "  1. Create and push tag v$NEW_VERSION"
-        echo "  2. Trigger GitHub Actions to create the release"
-        echo "  3. Automatically update script versions"
-        echo ""
-        read -p "Continue with minor release? (y/N): " confirm
-        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-          echo "Release cancelled"
-          exit 1
-        fi
-
-        echo "Creating minor release v$NEW_VERSION..."
-        git tag -a "v$NEW_VERSION" -m "Minor release v$NEW_VERSION"
-        git push origin "v$NEW_VERSION"
-        echo "✅ Minor release tag v$NEW_VERSION pushed!"
-        echo "🚀 Check GitHub Actions: https://github.com/{{.GITHUB_REPO}}/actions"
+      - ./release minor
 
   release:major:
-    desc: Create a major release (increment major version)
+    desc: Create a major release (auto-increment from latest git tag)
+    deps:
+      - release:check
     cmds:
-      - task: release:check
-      - |
-        CURRENT_VERSION=$(task release:current)
-        echo "Current version: v$CURRENT_VERSION"
-
-        # Parse version components
-        MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
-
-        # Increment major version, reset minor and patch to 0
-        NEW_MAJOR=$((MAJOR + 1))
-        NEW_VERSION="$NEW_MAJOR.0.0"
-
-        echo "New major version: v$NEW_VERSION"
-        echo ""
-        echo "⚠️  MAJOR RELEASE - This indicates breaking changes!"
-        echo ""
-        echo "This will:"
-        echo "  1. Create and push tag v$NEW_VERSION"
-        echo "  2. Trigger GitHub Actions to create the release"
-        echo "  3. Automatically update script versions"
-        echo ""
-        read -p "Continue with MAJOR release? (y/N): " confirm
-        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-          echo "Release cancelled"
-          exit 1
-        fi
-
-        echo "Creating major release v$NEW_VERSION..."
-        git tag -a "v$NEW_VERSION" -m "Major release v$NEW_VERSION"
-        git push origin "v$NEW_VERSION"
-        echo "✅ Major release tag v$NEW_VERSION pushed!"
-        echo "🚀 Check GitHub Actions: https://github.com/{{.GITHUB_REPO}}/actions"
+      - ./release major
 
   release:info:
     desc: Show current version and release options
     cmds:
       - |
-        CURRENT_VERSION=$(task release:current)
-        echo "🏷️  Current Version: v$CURRENT_VERSION"
+        # Use the release script to get current version (considers git tags)
+        echo "🏷️  Version Information:"
+        ./release --current
         echo ""
+
+        # Get effective current version for next version calculations
+        CURRENT_VERSION=$(./release --current | grep "Current version:" | cut -d' ' -f3)
         echo "📋 Release Options:"
         echo "  task release:patch   → v$(echo $CURRENT_VERSION | awk -F. '{print $1"."$2"."($3+1)}')"
         echo "  task release:minor   → v$(echo $CURRENT_VERSION | awk -F. '{print $1"."($2+1)".0"}')"
         echo "  task release:major   → v$(echo $CURRENT_VERSION | awk -F. '{print ($1+1)".0.0"}')"
         echo ""
-        echo "🔄 Other Options:"
-        echo "  task release:create VERSION=x.y.z  → Custom version"
-        echo "  task release:manual                → GitHub UI release"
+        echo "🔄 Manual Options:"
+        echo "  ./release <version>  → Custom version (e.g., ./release 3.1.4)"
+        echo "  ./release --help     → See all options"
         echo ""
-        echo "ℹ️  Note: All releases trigger automatic GitHub Actions workflows"
-        echo "   that will update script versions and create GitHub releases."
+        echo "🏷️  Recent Git Tags:"
+        git tag --list --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -5 || echo "  (no version tags found)"
+        echo ""
+        echo "ℹ️  Note: Versions are auto-incremented from the latest git tag,"
+        echo "   not from script versions. This handles existing tags intelligently."
 
   # Dependabot tasks
   deps:status:
