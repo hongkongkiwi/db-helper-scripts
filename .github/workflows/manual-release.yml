@@ -1,0 +1,194 @@
+name: Manual Release
+
+"on":
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 1.2.3)'
+        required: true
+        type: string
+      release_type:
+        description: 'Type of release'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - prerelease
+      release_notes:
+        description: 'Custom release notes (optional)'
+        required: false
+        type: string
+
+jobs:
+  manual-release:
+    name: Create Manual Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ github.event.inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Version must be in format 1.2.3 (without 'v' prefix)"
+            exit 1
+          fi
+
+      - name: Check if tag exists
+        run: |
+          if git rev-parse "v${{ github.event.inputs.version }}" >/dev/null 2>&1; then
+            echo "Error: Tag v${{ github.event.inputs.version }} already exists"
+            exit 1
+          fi
+
+      - name: Update script versions
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          # Update version in each script
+          sed -i "s/SCRIPT_VERSION=\"[^\"]*\"/SCRIPT_VERSION=\"$VERSION\"/" db-backup-restore || \
+            echo "No SCRIPT_VERSION found in db-backup-restore"
+          sed -i "s/SCRIPT_VERSION=\"[^\"]*\"/SCRIPT_VERSION=\"$VERSION\"/" db-copy || \
+            echo "No SCRIPT_VERSION found in db-copy"
+          sed -i "s/SCRIPT_VERSION=\"[^\"]*\"/SCRIPT_VERSION=\"$VERSION\"/" db-user-manager || \
+            echo "No SCRIPT_VERSION found in db-user-manager"
+          sed -i "s/# Version: [0-9.]*/# Version: $VERSION/" db-user-manager || \
+            echo "No version comment found in db-user-manager"
+
+          # Update Dockerfile version label
+          sed -i "s/LABEL version=\"[^\"]*\"/LABEL version=\"$VERSION\"/" Dockerfile || \
+            echo "No version label found in Dockerfile"
+
+      - name: Update README versions
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          # Update version references in README
+          sed -i "s/\*\*db-backup-restore\*\*: v[0-9.]*/**db-backup-restore**: v$VERSION/" README.md
+          sed -i "s/\*\*db-copy\*\*: v[0-9.]*/**db-copy**: v$VERSION/" README.md
+          sed -i "s/\*\*db-user-manager\*\*: v[0-9.]*/**db-user-manager**: v$VERSION/" README.md
+
+      - name: Generate or use custom release notes
+        id: notes
+        run: |
+          if [ -n "${{ github.event.inputs.release_notes }}" ]; then
+            echo "${{ github.event.inputs.release_notes }}" > RELEASE_NOTES.md
+          else
+            # Generate changelog from recent commits
+            PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+            if [ -n "$PREVIOUS_TAG" ]; then
+              {
+                echo "## Changes since $PREVIOUS_TAG"
+                echo ""
+                git log --pretty=format:"- %s (%h)" "${PREVIOUS_TAG}..HEAD"
+              } > RELEASE_NOTES.md
+            else
+              {
+                echo "## Release v${{ github.event.inputs.version }}"
+                echo ""
+                echo "- Manual release of db-helper-scripts"
+              } > RELEASE_NOTES.md
+            fi
+          fi
+
+          {
+            echo ""
+            echo "## Script Versions"
+            echo "- db-backup-restore: v${{ github.event.inputs.version }}"
+            echo "- db-copy: v${{ github.event.inputs.version }}"
+            echo "- db-user-manager: v${{ github.event.inputs.version }}"
+          } >> RELEASE_NOTES.md
+
+      - name: Commit version updates
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add db-backup-restore db-copy db-user-manager README.md
+          git commit -m "Release v${{ github.event.inputs.version }}"
+
+      - name: Create and push tag
+        run: |
+          git tag -a "v${{ github.event.inputs.version }}" -m "Release v${{ github.event.inputs.version }}"
+          git push origin "v${{ github.event.inputs.version }}"
+          git push origin main
+
+      - name: Create release archive
+        run: |
+          mkdir -p release
+
+          # Copy main scripts
+          cp db-backup-restore db-copy db-user-manager release/
+          cp run-tests release/
+          cp Taskfile.yml release/
+          cp README.md release/
+          cp Dockerfile release/
+          cp .dockerignore release/
+          cp docker-compose.yml release/
+
+          # Copy supporting files
+          cp -r tests release/
+
+          # Create installation script
+          cat > release/install.sh << 'EOF'
+          #!/bin/bash
+          set -e
+
+          INSTALL_DIR="${HOME}/.local/bin"
+          SCRIPTS="db-backup-restore db-copy db-user-manager"
+
+          echo "Installing db-helper-scripts v${{ github.event.inputs.version }} to $INSTALL_DIR"
+          mkdir -p "$INSTALL_DIR"
+
+          for script in $SCRIPTS; do
+            if [ -f "$script" ]; then
+              echo "Installing $script"
+              cp "$script" "$INSTALL_DIR/"
+              chmod +x "$INSTALL_DIR/$script"
+            else
+              echo "Warning: $script not found"
+            fi
+          done
+
+          echo "Installation complete!"
+          echo "Make sure $INSTALL_DIR is in your PATH"
+
+          # Check PATH
+          if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+            echo ""
+            echo "To add $INSTALL_DIR to your PATH, add this line to your shell profile:"
+            case "$SHELL" in
+              */zsh) echo "echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.zshrc" ;;
+              */fish) echo "echo 'set -gx PATH \$PATH $INSTALL_DIR' >> ~/.config/fish/config.fish" ;;
+              *) echo "echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bashrc" ;;
+            esac
+          fi
+          EOF
+
+          chmod +x release/install.sh
+
+          # Create tarball
+          tar -czf db-helper-scripts-${{ github.event.inputs.version }}.tar.gz -C release .
+
+          # Create zip file
+          cd release && zip -r ../db-helper-scripts-${{ github.event.inputs.version }}.zip . && cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: Release v${{ github.event.inputs.version }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ github.event.inputs.release_type == 'prerelease' }}
+          files: |
+            db-helper-scripts-${{ github.event.inputs.version }}.tar.gz
+            db-helper-scripts-${{ github.event.inputs.version }}.zip
+          token: ${{ secrets.GITHUB_TOKEN }}

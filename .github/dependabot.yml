@@ -1,0 +1,71 @@
+version: 2
+updates:
+  # GitHub Actions dependencies
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "hongkongkiwi"
+    assignees:
+      - "hongkongkiwi"
+    commit-message:
+      prefix: "ci"
+      prefix-development: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "auto-merge"
+
+  # Docker dependencies
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "hongkongkiwi"
+    assignees:
+      - "hongkongkiwi"
+    commit-message:
+      prefix: "docker"
+      prefix-development: "docker"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "auto-merge"
+
+  # Pre-commit hooks
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "06:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "hongkongkiwi"
+    assignees:
+      - "hongkongkiwi"
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "python"
+      - "auto-merge"
+    allow:
+      # Only update pre-commit and testing dependencies
+      - dependency-name: "pre-commit"
+      - dependency-name: "yamllint"
+      - dependency-name: "shellcheck-py"
+      - dependency-name: "actionlint-py"
+      - dependency-name: "hadolint-py"

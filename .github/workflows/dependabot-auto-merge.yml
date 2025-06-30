@@ -1,0 +1,157 @@
+name: Dependabot Auto-Merge
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+jobs:
+  dependabot-auto-merge:
+    name: Auto-merge Dependabot PRs
+    runs-on: ubuntu-latest
+
+    # Only run on Dependabot PRs
+    if: >
+      github.actor == 'dependabot[bot]' &&
+      contains(github.event.pull_request.labels.*.name, 'auto-merge')
+
+    steps:
+      - name: Get Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Check if PR is ready for auto-merge
+        id: check-ready
+        run: |
+          # Check if PR is in draft state
+          if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+            echo "PR is in draft state, skipping auto-merge"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Check update type (patch, minor, major)
+          UPDATE_TYPE="${{ steps.metadata.outputs.update-type }}"
+          echo "Update type: $UPDATE_TYPE"
+
+          # Only auto-merge patch and minor updates, not major updates
+          if [[ "$UPDATE_TYPE" == "version-update:semver-major" ]]; then
+            echo "Major version update detected, skipping auto-merge"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "PR is ready for auto-merge"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for CI checks to complete
+        if: steps.check-ready.outputs.ready == 'true'
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          check-name: 'Lint Scripts'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 30
+          allowed-conclusions: success,skipped
+
+      - name: Wait for additional CI checks
+        if: steps.check-ready.outputs.ready == 'true'
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          check-name: 'Test Scripts'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 30
+          allowed-conclusions: success,skipped
+
+      - name: Enable auto-merge for Dependabot PRs
+        if: steps.check-ready.outputs.ready == 'true'
+        run: |
+          # Enable auto-merge on the PR
+          gh pr merge --auto --squash "$PR_URL"
+
+          # Add a comment explaining the auto-merge
+          cat << 'EOF' > comment.md
+          🤖 **Dependabot Auto-Merge**
+
+          This PR has been automatically approved for merging because:
+          - ✅ It's a **${{ steps.metadata.outputs.update-type }}** update
+          - ✅ All CI checks have passed
+          - ✅ It contains the `auto-merge` label
+
+          The PR will be automatically merged when all required checks pass.
+
+          ---
+
+          **Dependency Update Details:**
+          - **Package:** ${{ steps.metadata.outputs.dependency-names }}
+          - **Update Type:** ${{ steps.metadata.outputs.update-type }}
+          - **Previous Version:** ${{ steps.metadata.outputs.previous-version }}
+          - **New Version:** ${{ steps.metadata.outputs.new-version }}
+          EOF
+
+          gh pr comment "$PR_URL" --body-file comment.md
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve the PR
+        if: steps.check-ready.outputs.ready == 'true'
+        run: |
+          gh pr review --approve "$PR_URL" --body "🤖 Auto-approved by Dependabot workflow after successful CI checks"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Handle major version updates separately
+  dependabot-major-update:
+    name: Handle Major Updates
+    runs-on: ubuntu-latest
+
+    if: >
+      github.actor == 'dependabot[bot]' &&
+      contains(github.event.pull_request.labels.*.name, 'auto-merge')
+
+    steps:
+      - name: Get Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Comment on major updates
+        if: steps.metadata.outputs.update-type == 'version-update:semver-major'
+        run: |
+          cat << 'EOF' > comment.md
+          🚨 **Major Version Update Detected**
+
+          This PR contains a **major version update** and requires manual review:
+
+          **Dependency Update Details:**
+          - **Package:** ${{ steps.metadata.outputs.dependency-names }}
+          - **Update Type:** ${{ steps.metadata.outputs.update-type }}
+          - **Previous Version:** ${{ steps.metadata.outputs.previous-version }}
+          - **New Version:** ${{ steps.metadata.outputs.new-version }}
+
+          **Next Steps:**
+          1. 🔍 Review the breaking changes in the changelog
+          2. 🧪 Test the update thoroughly
+          3. ✅ Manually approve and merge when ready
+
+          This PR will **NOT** be auto-merged due to potential breaking changes.
+          EOF
+
+          gh pr comment "$PR_URL" --body-file comment.md
+
+          # Remove auto-merge label for major updates
+          gh pr edit "$PR_URL" --remove-label "auto-merge"
+          gh pr edit "$PR_URL" --add-label "major-update"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

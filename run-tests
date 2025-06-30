@@ -301,11 +301,13 @@ start_test_environment() {
 
 run_test_suite() {
     local test_file="$1"
-    local test_name=$(basename "$test_file" .bats)
+    local test_name
+    test_name=$(basename "$test_file" .bats)
 
     log_info "Running test suite: $test_name"
 
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
     local test_output_file="/tmp/test_${test_name}_output.txt"
     local test_results_file="/tmp/test_${test_name}_results.tap"
 
@@ -324,7 +326,7 @@ run_test_suite() {
 
     # Run tests with timeout
     local exit_code=0
-    if run_with_timeout "$TIMEOUT" $bats_cmd "$test_file" > "$test_results_file" 2> "$test_output_file"; then
+    if run_with_timeout "$TIMEOUT" "$bats_cmd" "$test_file" > "$test_results_file" 2> "$test_output_file"; then
         log_success "Test suite '$test_name' completed successfully"
     else
         exit_code=$?
@@ -335,6 +337,7 @@ run_test_suite() {
         fi
     fi
 
+    local end_time
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
@@ -361,7 +364,9 @@ run_test_suite() {
     if [[ -f "$test_results_file" && $suite_failed -gt 0 ]]; then
         while IFS= read -r line; do
             if [[ $line =~ ^not\ ok ]]; then
-                local test_desc=$(echo "$line" | sed 's/^not ok [0-9]* //')
+                local test_desc
+                local test_desc
+                test_desc=$(echo "$line" | sed 's/^not ok [0-9]* //')
                 FAILED_TEST_NAMES+=("$test_name: $test_desc")
             fi
         done < "$test_results_file"
@@ -406,8 +411,11 @@ Generated: $(date)
 EOF
 
     # Analyze test files for feature coverage
+    local backup_tests
     local backup_tests=$(find "$TEST_DIR" -name "*backup*" -type f | wc -l)
+    local copy_tests
     local copy_tests=$(find "$TEST_DIR" -name "*copy*" -type f | wc -l)
+    local user_tests
     local user_tests=$(find "$TEST_DIR" -name "*user*" -type f | wc -l)
 
     cat >> "$coverage_file" << EOF
@@ -436,7 +444,9 @@ EOF
 }
 
 generate_json_report() {
+    local current_time
     local current_time=$(date +%s)
+    local duration
     local duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
 
     cat << EOF
@@ -511,6 +521,7 @@ retry_failed_tests() {
 
     # Run each failed test individually
     for failed_test in "${FAILED_TEST_NAMES[@]}"; do
+        local test_suite
         local test_suite=$(echo "$failed_test" | cut -d: -f1)
         local test_file="$TEST_DIR/scripts/test_${test_suite}.bats"
 
@@ -675,7 +686,9 @@ main() {
     generate_performance_report
 
     # Final summary
+    local current_time
     local current_time=$(date +%s)
+    local total_duration
     local total_duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
 
     echo

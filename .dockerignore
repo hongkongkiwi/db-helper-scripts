@@ -1,46 +1,73 @@
-# Git files
+# Git
 .git
 .gitignore
+.gitattributes
 
-# Documentation (except README)
-*.md
-!README.md
+# GitHub Actions
+.github/
 
-# Logs and temporary files
-*.log
-tmp/
-logs/
-reports/
-.DS_Store
+# IDE and editor files
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
 
-# IDE files
-.vscode/
-.idea/
-*.sublime-*
-
-# Test artifacts
-tests/tmp/
-tests/logs/
-tests/reports/
-tests/bats-helpers/
-
-# OS files
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+
+# Logs
+*.log
+logs/
+tests/logs/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+tests/tmp/
 
 # Build artifacts
 *.tar.gz
 *.zip
-*.deb
-*.rpm
+dist/
+build/
 
-# Backup files
-*.bak
-*.backup
+# Docker files (avoid recursive copying)
+Dockerfile*
+.dockerignore
 
-# Cache directories
-.cache/
+# Test reports and coverage
+tests/reports/
+coverage/
+*.coverage
+
+# Node modules (if any)
 node_modules/
+
+# Python cache (if any)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Documentation that's not needed in container
+docs/
+*.md
+!README.md
+
+# CI/CD specific files
+.travis.yml
+.circleci/
+azure-pipelines.yml
+Jenkinsfile
+
+# Static analysis
+static-analysis.*

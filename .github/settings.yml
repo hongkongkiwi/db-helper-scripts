@@ -1,0 +1,93 @@
+# Repository settings for hongkongkiwi/db-helper-scripts
+# This file can be used with the Probot Settings app to configure repository settings
+
+repository:
+  name: db-helper-scripts
+  description: "Database helper scripts for PostgreSQL backup, restore, copy, and user management"
+  homepage: "https://github.com/hongkongkiwi/db-helper-scripts"
+  topics:
+    - postgresql
+    - database
+    - backup
+    - restore
+    - devops
+    - shell-scripts
+    - automation
+  private: false
+  has_issues: true
+  has_projects: true
+  has_wiki: false
+  has_downloads: true
+  default_branch: main
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: false
+  allow_auto_merge: true
+  delete_branch_on_merge: true
+  allow_update_branch: true
+  use_squash_pr_title_as_default: true
+  squash_merge_commit_title: "PR_TITLE"
+  squash_merge_commit_message: "PR_BODY"
+
+# Labels for the repository
+labels:
+  - name: "auto-merge"
+    color: "0e8a16"
+    description: "Enable automatic merging for this PR"
+
+  - name: "dependencies"
+    color: "0366d6"
+    description: "Pull requests that update a dependency file"
+
+  - name: "github-actions"
+    color: "2088ff"
+    description: "GitHub Actions workflow updates"
+
+  - name: "docker"
+    color: "0db7ed"
+    description: "Docker-related changes"
+
+  - name: "python"
+    color: "3776ab"
+    description: "Python dependency updates"
+
+  - name: "major-update"
+    color: "d73a49"
+    description: "Major version update requiring manual review"
+
+  - name: "security"
+    color: "ee0701"
+    description: "Security-related updates"
+
+  - name: "enhancement"
+    color: "a2eeef"
+    description: "New feature or request"
+
+  - name: "bug"
+    color: "d73a49"
+    description: "Something isn't working"
+
+  - name: "documentation"
+    color: "0075ca"
+    description: "Improvements or additions to documentation"
+
+# Branch protection rules
+branches:
+  - name: main
+    protection:
+      required_status_checks:
+        strict: true
+        contexts:
+          - "Lint Scripts"
+          - "Test Scripts"
+      enforce_admins: false
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+        require_code_owner_reviews: false
+        dismissal_restrictions:
+          users: []
+          teams: []
+      restrictions: null
+      allow_force_pushes: false
+      allow_deletions: false

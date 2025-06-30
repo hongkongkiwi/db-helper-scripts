@@ -1,0 +1,19 @@
+---
+ignored:
+  # Allow using latest tag for some cases
+  - DL3007
+  # Allow using apt-get update in same layer
+  - DL3009
+  # Allow using --privileged flag where needed
+  - DL3024
+  # Allow using arbitrary user (not requiring non-root)
+  - DL3002
+
+failure-threshold: error
+
+format: tty
+
+trustedRegistries:
+  - docker.io
+  - ubuntu
+  - postgres

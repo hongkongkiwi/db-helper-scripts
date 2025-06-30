@@ -160,7 +160,7 @@ sanitize_for_log() {
 sanitize_string() {
     local input="$1"
     # Remove potentially dangerous characters
-    echo "$input" | tr -d '`;|&$(){}[]<>*?~^!"'"'"
+    echo "$input" | tr -d "';|&\$(){}[]<>*?~^!\""
 }
 
 validate_db_name() {
@@ -168,7 +168,7 @@ validate_db_name() {
     # PostgreSQL database name validation
     if [[ ! "$db_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || [[ ${#db_name} -gt 63 ]]; then
         log_error "Invalid database name: $db_name (must start with letter/underscore, contain only alphanumeric/underscore, max 63 chars)"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 }
 
@@ -180,12 +180,12 @@ validate_numeric() {
 
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
         log_error "Invalid numeric value for $name: $value (must be a number)"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     if [[ $value -lt $min ]] || [[ $value -gt $max ]]; then
         log_error "Value out of range for $name: $value (must be between $min and $max)"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 }
 
@@ -475,7 +475,8 @@ sync_database() {
     done <<< "$target_tables"
 
     # Use pg_dump with --clean to handle schema changes and data sync
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(mktemp)
     TEMP_FILES+=("$temp_file")
 
     # Build sync-optimized dump options
@@ -508,7 +509,7 @@ sync_database() {
     log_verbose "Applying changes to target database"
     if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
         log_error "Failed to sync database"
-        exit $EXIT_COPY_ERROR
+        exit "$EXIT_COPY_ERROR"
     fi
 
     log_success "Database sync completed"
@@ -528,7 +529,8 @@ optimize_database_performance() {
     case "$operation" in
         "start")
             # Store original settings
-            local original_settings=$(mktemp)
+            local original_settings
+    original_settings=$(mktemp)
             TEMP_FILES+=("$original_settings")
 
             execute_pg_command psql "$connection_string" -t -c "SELECT name, setting FROM pg_settings WHERE name IN ('maintenance_work_mem', 'work_mem', 'checkpoint_completion_target', 'wal_buffers');" > "$original_settings"
@@ -559,7 +561,7 @@ copy_database() {
     log_verbose "Target: $(sanitize_for_log "$target_conn")"
 
     # Test connections
-    test_connection "$src_conn" "source" || exit $EXIT_CONNECTION_ERROR
+    test_connection "$src_conn" "source" || exit "$EXIT_CONNECTION_ERROR"
 
     # Detect if we're copying on the same server for optimization
     local same_server=false
@@ -589,15 +591,15 @@ copy_database() {
                     if read -p "Are you sure you want to drop the target database? (y/N): " -t 10 -r 2>/dev/null; then
                         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                             log_info "Operation cancelled by user"
-                            exit $EXIT_SUCCESS
+                            exit "$EXIT_SUCCESS"
                         fi
                     else
                         log_warning "No response within 10 seconds, cancelling operation"
-                        exit $EXIT_SUCCESS
+                        exit "$EXIT_SUCCESS"
                     fi
                 else
                     log_warning "Non-interactive environment: skipping drop confirmation without --skip-confirmation"
-                    exit $EXIT_SUCCESS
+                    exit "$EXIT_SUCCESS"
                 fi
             fi
             drop_target_database "$target_conn"
@@ -607,7 +609,7 @@ copy_database() {
             log_error "  --drop-target    : Drop and recreate target database"
             log_error "  --sync           : Sync target database with source"
             log_error "  --force          : Append/overwrite data in existing database"
-            exit $EXIT_TARGET_EXISTS_ERROR
+            exit "$EXIT_TARGET_EXISTS_ERROR"
         else
             log_warning "Force mode enabled - will overwrite existing data"
         fi
@@ -641,7 +643,7 @@ copy_database() {
     fi
 
     # Test target connection
-    test_connection "$target_conn" "target" || exit $EXIT_CONNECTION_ERROR
+    test_connection "$target_conn" "target" || exit "$EXIT_CONNECTION_ERROR"
 
     # Get source database info
     local src_size=$(get_database_info "$src_conn" "size")
@@ -670,7 +672,7 @@ copy_database() {
         if ! validate_copy_result "$src_conn" "$target_conn"; then
             log_warning "Validation detected differences between source and target databases"
             if [[ "$FORCE" != "true" ]]; then
-                exit $EXIT_VALIDATION_ERROR
+                exit "$EXIT_VALIDATION_ERROR"
             fi
         fi
     fi
@@ -692,7 +694,7 @@ create_target_database() {
 
     if ! execute_pg_command psql "$base_conn" -c "CREATE DATABASE \"$TARGET_DB_NAME\";" 2>/dev/null; then
         log_error "Failed to create target database: $TARGET_DB_NAME"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     log_verbose "Target database created successfully"
@@ -711,7 +713,7 @@ drop_target_database() {
 
     if ! execute_pg_command psql "$base_conn" -c "DROP DATABASE IF EXISTS \"$TARGET_DB_NAME\";" 2>/dev/null; then
         log_error "Failed to drop target database: $TARGET_DB_NAME"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     log_verbose "Target database dropped successfully"
@@ -723,7 +725,8 @@ copy_schema_only() {
 
     log_info "Copying schema only (no data)"
 
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(mktemp)
     TEMP_FILES+=("$temp_file")
 
     # Build pg_dump options
@@ -740,14 +743,14 @@ copy_schema_only() {
     log_verbose "Dumping schema from source database"
     if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" > "$temp_file"; then
         log_error "Failed to dump schema from source database"
-        exit $EXIT_COPY_ERROR
+        exit "$EXIT_COPY_ERROR"
     fi
 
     # Restore schema
     log_verbose "Restoring schema to target database"
     if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
         log_error "Failed to restore schema to target database"
-        exit $EXIT_COPY_ERROR
+        exit "$EXIT_COPY_ERROR"
     fi
 
     log_success "Schema copy completed"
@@ -759,7 +762,8 @@ copy_data_only() {
 
     log_info "Copying data only (no schema)"
 
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(mktemp)
     TEMP_FILES+=("$temp_file")
 
     # Build pg_dump options
@@ -776,14 +780,14 @@ copy_data_only() {
     log_verbose "Dumping data from source database"
     if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" > "$temp_file"; then
         log_error "Failed to dump data from source database"
-        exit $EXIT_COPY_ERROR
+        exit "$EXIT_COPY_ERROR"
     fi
 
     # Restore data
     log_verbose "Restoring data to target database"
     if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
         log_error "Failed to restore data to target database"
-        exit $EXIT_COPY_ERROR
+        exit "$EXIT_COPY_ERROR"
     fi
 
     log_success "Data copy completed"
@@ -795,7 +799,8 @@ copy_full_database() {
 
     log_info "Copying full database (schema and data)"
 
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(mktemp)
     TEMP_FILES+=("$temp_file")
 
     # Build pg_dump options
@@ -826,7 +831,7 @@ copy_full_database() {
     log_verbose "Dumping database from source"
     if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" "$temp_file"; then
         log_error "Failed to dump database from source"
-        exit $EXIT_COPY_ERROR
+        exit "$EXIT_COPY_ERROR"
     fi
 
     # Restore database
@@ -836,13 +841,13 @@ copy_full_database() {
         local restore_options=("--jobs=$PARALLEL_JOBS" "--no-owner" "--no-privileges")
         if ! execute_pg_command pg_restore "$target_conn" "${restore_options[@]}" "$temp_file"; then
             log_error "Failed to restore database to target"
-            exit $EXIT_COPY_ERROR
+            exit "$EXIT_COPY_ERROR"
         fi
     else
         # Use psql for plain format
         if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
             log_error "Failed to restore database to target"
-            exit $EXIT_COPY_ERROR
+            exit "$EXIT_COPY_ERROR"
         fi
     fi
 
@@ -1049,7 +1054,7 @@ cmd_copy() {
             --password)
                 if [[ -t 0 ]]; then
                     # Add timeout to prevent hangs in test environments
-                    if read -s -p "Enter password: " -t 10 password 2>/dev/null; then
+                    if read -r -s -p "Enter password: " -t 10 password 2>/dev/null; then
                         echo
                         SRC_DB_PASSWORD="$password"
                         TARGET_DB_PASSWORD="$password"
@@ -1190,12 +1195,12 @@ cmd_copy() {
                 ;;
             -h|--help)
                 show_copy_help
-                exit $EXIT_SUCCESS
+                exit "$EXIT_SUCCESS"
                 ;;
             *)
                 log_error "Unknown option for copy command: $1"
                 show_copy_help
-                exit $EXIT_GENERAL_ERROR
+                exit "$EXIT_GENERAL_ERROR"
                 ;;
         esac
     done
@@ -1203,12 +1208,12 @@ cmd_copy() {
     # Validate required parameters
     if [[ -z "$SRC_DB_NAME" ]]; then
         log_error "Source database name is required (--src-dbname or -d)"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     if [[ -z "$TARGET_DB_NAME" ]]; then
         log_error "Target database name is required (--target-dbname)"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Set default values
@@ -1221,7 +1226,7 @@ cmd_copy() {
     # Validate mutually exclusive options
     if [[ "$SCHEMA_ONLY" == "true" && "$DATA_ONLY" == "true" ]]; then
         log_error "Cannot specify both --schema-only and --data-only"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Critical validation: Check for same server AND same database name
@@ -1230,7 +1235,7 @@ cmd_copy() {
             log_error "Cannot copy database to itself! Source and target database names must be different when copying on the same server"
             log_error "Source: $SRC_DB_NAME on $SRC_DB_HOST:$SRC_DB_PORT"
             log_error "Target: $TARGET_DB_NAME on $TARGET_DB_HOST:$TARGET_DB_PORT"
-            exit $EXIT_GENERAL_ERROR
+            exit "$EXIT_GENERAL_ERROR"
         fi
         log_verbose "Same-server copy detected: '$SRC_DB_NAME' -> '$TARGET_DB_NAME'"
     fi
@@ -1239,7 +1244,7 @@ cmd_copy() {
     if [[ "$USE_TEMPLATE_COPY" == "true" ]]; then
         if ! is_same_server "$SRC_DB_HOST" "$SRC_DB_PORT" "$TARGET_DB_HOST" "$TARGET_DB_PORT"; then
             log_error "Template-based copy (--fast) requires source and target to be on the same server"
-            exit $EXIT_GENERAL_ERROR
+            exit "$EXIT_GENERAL_ERROR"
         fi
 
         if [[ "$SCHEMA_ONLY" == "true" || "$DATA_ONLY" == "true" ]]; then
@@ -1257,7 +1262,7 @@ cmd_copy() {
     if [[ "$SYNC_MODE" == "true" ]]; then
         if [[ "$DROP_TARGET" == "true" ]]; then
             log_error "Cannot use --sync with --drop-target (sync requires existing target database)"
-            exit $EXIT_GENERAL_ERROR
+            exit "$EXIT_GENERAL_ERROR"
         fi
 
         if [[ "$CREATE_TARGET" == "false" ]]; then
@@ -1276,37 +1281,37 @@ cmd_copy() {
 
     if [[ "$TRUNCATE_TABLES" == "true" && "$SYNC_MODE" != "true" ]]; then
         log_error "Table truncation (--truncate-tables) can only be used with sync mode (--sync)"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Validate SSL configuration
     if [[ -n "$SSL_CERT" && ! -f "$SSL_CERT" ]]; then
         log_error "SSL certificate file not found: $SSL_CERT"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     if [[ -n "$SSL_KEY" && ! -f "$SSL_KEY" ]]; then
         log_error "SSL key file not found: $SSL_KEY"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     if [[ -n "$SSL_CA" && ! -f "$SSL_CA" ]]; then
         log_error "SSL CA certificate file not found: $SSL_CA"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Validate memory settings format
     if [[ -n "$MAINTENANCE_WORK_MEM" ]]; then
         if ! [[ "$MAINTENANCE_WORK_MEM" =~ ^[0-9]+[kKmMgG]?[bB]?$ ]]; then
             log_error "Invalid maintenance_work_mem format: $MAINTENANCE_WORK_MEM (use format like '256MB', '1GB')"
-            exit $EXIT_GENERAL_ERROR
+            exit "$EXIT_GENERAL_ERROR"
         fi
     fi
 
     if [[ -n "$WORK_MEM" ]]; then
         if ! [[ "$WORK_MEM" =~ ^[0-9]+[kKmMgG]?[bB]?$ ]]; then
             log_error "Invalid work_mem format: $WORK_MEM (use format like '64MB', '1GB')"
-            exit $EXIT_GENERAL_ERROR
+            exit "$EXIT_GENERAL_ERROR"
         fi
     fi
 
@@ -1513,19 +1518,19 @@ cmd_install() {
     # Create install directory if it doesn't exist
     if ! mkdir -p "$install_dir"; then
         log_error "Failed to create install directory: $install_dir"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Copy script to install directory
     if ! cp "$script_path" "$install_dir/$SCRIPT_NAME"; then
         log_error "Failed to copy script to $install_dir"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Make executable
     if ! chmod +x "$install_dir/$SCRIPT_NAME"; then
         log_error "Failed to make script executable"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     log_info "Successfully installed $SCRIPT_NAME to $install_dir"
@@ -1549,7 +1554,7 @@ cmd_uninstall() {
             log_info "Successfully removed $SCRIPT_NAME from $install_dir"
         else
             log_error "Failed to remove $installed_script"
-            exit $EXIT_GENERAL_ERROR
+            exit "$EXIT_GENERAL_ERROR"
         fi
     else
         log_warning "$SCRIPT_NAME is not installed in $install_dir"
@@ -1558,15 +1563,15 @@ cmd_uninstall() {
 }
 
 cmd_update() {
-    local github_repo="patrol6/db-helper-scripts"
+    local github_repo="hongkongkiwi/db-helper-scripts"
     local temp_dir
     temp_dir=$(mktemp -d) || {
         log_error "Failed to create temporary directory"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     }
 
     # Cleanup temp directory on exit
-    trap "rm -rf '$temp_dir'" EXIT
+    trap 'rm -rf "$temp_dir"' EXIT
 
     log_info "Checking for updates from https://github.com/$github_repo..."
 
@@ -1574,12 +1579,12 @@ cmd_update() {
     local latest_version
     if ! latest_version=$(curl -s "https://api.github.com/repos/$github_repo/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' 2>/dev/null); then
         log_error "Failed to check for updates. Please check your internet connection."
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     if [[ -z "$latest_version" ]]; then
         log_error "Could not determine latest version"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     log_info "Latest version: $latest_version"
@@ -1596,19 +1601,19 @@ cmd_update() {
     local download_url="https://github.com/$github_repo/archive/refs/tags/$latest_version.tar.gz"
     if ! curl -L "$download_url" -o "$temp_dir/update.tar.gz"; then
         log_error "Failed to download update"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Extract archive
     if ! tar -xzf "$temp_dir/update.tar.gz" -C "$temp_dir" --strip-components=1; then
         log_error "Failed to extract update"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Check if the script exists in the download
     if [[ ! -f "$temp_dir/$SCRIPT_NAME" ]]; then
         log_error "Script not found in downloaded update"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Get current script path
@@ -1618,7 +1623,7 @@ cmd_update() {
     # Update current script
     if ! cp "$temp_dir/$SCRIPT_NAME" "$current_script"; then
         log_error "Failed to update script"
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     # Make sure it's executable
@@ -1660,7 +1665,7 @@ main() {
                 ;;
             -h|--help)
                 show_help
-                exit $EXIT_SUCCESS
+                exit "$EXIT_SUCCESS"
                 ;;
             copy|clone|help|version|install|uninstall|update)
                 break
@@ -1668,7 +1673,7 @@ main() {
             *)
                 log_error "Unknown global option: $1"
                 show_help
-                exit $EXIT_GENERAL_ERROR
+                exit "$EXIT_GENERAL_ERROR"
                 ;;
         esac
     done
@@ -1676,7 +1681,7 @@ main() {
     if [[ $# -eq 0 ]]; then
         log_error "No command specified"
         show_help
-        exit $EXIT_GENERAL_ERROR
+        exit "$EXIT_GENERAL_ERROR"
     fi
 
     local command="$1"
@@ -1688,19 +1693,19 @@ main() {
             if ! command -v psql &> /dev/null; then
                 log_error "PostgreSQL client (psql) is required but not installed"
                 log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
-                exit $EXIT_GENERAL_ERROR
+                exit "$EXIT_GENERAL_ERROR"
             fi
 
             if ! command -v pg_dump &> /dev/null; then
                 log_error "PostgreSQL dump utility (pg_dump) is required but not installed"
                 log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
-                exit $EXIT_GENERAL_ERROR
+                exit "$EXIT_GENERAL_ERROR"
             fi
 
             if ! command -v pg_restore &> /dev/null; then
                 log_error "PostgreSQL restore utility (pg_restore) is required but not installed"
                 log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
-                exit $EXIT_GENERAL_ERROR
+                exit "$EXIT_GENERAL_ERROR"
             fi
             ;;
     esac
@@ -1731,7 +1736,7 @@ main() {
         *)
             log_error "Unknown command: $command"
             show_help
-            exit $EXIT_GENERAL_ERROR
+            exit "$EXIT_GENERAL_ERROR"
             ;;
     esac
 }

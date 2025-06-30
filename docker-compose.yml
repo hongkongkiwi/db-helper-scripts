@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  db-helper-scripts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: db-helper-scripts
+    volumes:
+      - ./data/backups:/data/backups
+      - ./data/logs:/data/logs
+      - ./tests:/app/tests
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGUSER=testuser
+      - PGPASSWORD=testpass
+      - PGDATABASE=testdb
+      - DB_BACKUP_DIR=/data/backups
+      - LOG_DIR=/data/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - db-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres-test
+    environment:
+      - POSTGRES_USER=testuser
+      - POSTGRES_PASSWORD=testpass
+      - POSTGRES_DB=testdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./tests/fixtures:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-network
+
+  # Alternative PostgreSQL version for testing compatibility
+  postgres-14:
+    image: postgres:14-alpine
+    container_name: postgres-14-test
+    environment:
+      - POSTGRES_USER=testuser
+      - POSTGRES_PASSWORD=testpass
+      - POSTGRES_DB=testdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_14_data:/var/lib/postgresql/data
+      - ./tests/fixtures:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-network
+    profiles:
+      - postgres-14
+
+volumes:
+  postgres_data:
+  postgres_14_data:
+
+networks:
+  db-network:
+    driver: bridge

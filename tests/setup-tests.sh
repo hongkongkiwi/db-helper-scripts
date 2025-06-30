@@ -326,6 +326,7 @@ test_installation() {
 
     # Test bats
     if command -v bats >/dev/null 2>&1; then
+        local bats_version
         local bats_version=$(bats --version)
         log_success "bats is working: $bats_version"
     else

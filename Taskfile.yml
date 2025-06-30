@@ -6,7 +6,7 @@ vars:
     - db-backup-restore
     - db-copy
     - db-user-manager
-  GITHUB_REPO: "patrol6/db-helper-scripts"
+  GITHUB_REPO: "hongkongkiwi/db-helper-scripts"
 
 tasks:
   default:
@@ -20,12 +20,25 @@ tasks:
     cmds:
       - chmod +x db-backup-restore db-copy db-user-manager run-tests
       - mkdir -p ~/.local/bin
-      - pre-commit install
+      - task: dev:lint:install
     status:
       - test -f ~/.git/hooks/pre-commit
 
   dev:lint:
-    desc: Run shellcheck on all scripts
+    desc: Run all linting tools via pre-commit
+    cmds:
+      - pre-commit run --all-files || echo "pre-commit not installed - run 'task dev:lint:install' first"
+
+  dev:lint:install:
+    desc: Install pre-commit hooks and dependencies
+    cmds:
+      - pip install -r requirements.txt
+      - pre-commit install
+      - pre-commit install --hook-type commit-msg
+      - echo "Pre-commit hooks and dependencies installed successfully"
+
+  dev:lint:shellcheck:
+    desc: Run shellcheck only (legacy)
     cmds:
       - shellcheck db-backup-restore db-copy db-user-manager run-tests tests/helpers/test_helpers.bash
     silent: true
@@ -90,7 +103,8 @@ tasks:
     cmds:
       - |
         echo "Checking for updates from {{.GITHUB_REPO}}..."
-        latest=$(curl -s "https://api.github.com/repos/{{.GITHUB_REPO}}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        latest=$(curl -s "https://api.github.com/repos/{{.GITHUB_REPO}}/releases/latest" | \
+          grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         echo "Latest release: $latest"
         # Store in temp file for next task
         echo "$latest" > /tmp/db-scripts-latest-version
@@ -135,12 +149,231 @@ tasks:
     cmds:
       - task: dev:lint
       - task: dev:test
-      - git status --porcelain | grep -q . && echo "Working directory not clean" && exit 1 || echo "Working directory clean"
+      - git status --porcelain | grep -q . && echo "Working directory not clean" && exit 1 || \
+          echo "Working directory clean"
 
   release:version:
     desc: Show current versions in scripts
     cmds:
       - grep -n "version" db-backup-restore db-copy db-user-manager | grep -E "v[0-9]+\.[0-9]+\.[0-9]+"
+
+  release:create:
+    desc: Create a new release (requires VERSION variable)
+    preconditions:
+      - sh: test -n "{{.VERSION}}"
+        msg: "Usage: task release:create VERSION=1.2.3"
+    cmds:
+      - task: release:check
+      - |
+        echo "Creating release v{{.VERSION}}..."
+        echo "This will trigger the GitHub Actions workflow."
+        echo "Make sure you have committed all changes."
+        read -p "Continue? (y/N): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+          echo "Release cancelled"
+          exit 1
+        fi
+      - git tag -a "v{{.VERSION}}" -m "Release v{{.VERSION}}"
+      - git push origin "v{{.VERSION}}"
+      - echo "Release tag v{{.VERSION}} pushed. Check GitHub Actions for release creation."
+
+  release:manual:
+    desc: Instructions for manual release via GitHub UI
+    cmds:
+      - |
+        echo "To create a manual release:"
+        echo "1. Go to https://github.com/{{.GITHUB_REPO}}/actions/workflows/manual-release.yml"
+        echo "2. Click 'Run workflow'"
+        echo "3. Enter the version number (e.g., 2.1.0)"
+        echo "4. Choose release type (release or prerelease)"
+        echo "5. Optionally add custom release notes"
+        echo "6. Click 'Run workflow'"
+        echo ""
+        echo "Current script versions:"
+        task release:version
+
+  release:current:
+    desc: Get current version from scripts
+    cmds:
+      - |
+        CURRENT_VERSION=$(grep 'SCRIPT_VERSION=' db-backup-restore | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        echo "$CURRENT_VERSION"
+    silent: true
+
+  release:patch:
+    desc: Create a patch release (increment patch version)
+    cmds:
+      - task: release:check
+      - |
+        CURRENT_VERSION=$(task release:current)
+        echo "Current version: v$CURRENT_VERSION"
+
+        # Parse version components
+        MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+        MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+        PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
+
+        # Increment patch version
+        NEW_PATCH=$((PATCH + 1))
+        NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+
+        echo "New patch version: v$NEW_VERSION"
+        echo ""
+        echo "This will:"
+        echo "  1. Create and push tag v$NEW_VERSION"
+        echo "  2. Trigger GitHub Actions to create the release"
+        echo "  3. Automatically update script versions"
+        echo ""
+        read -p "Continue with patch release? (y/N): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+          echo "Release cancelled"
+          exit 1
+        fi
+
+        echo "Creating patch release v$NEW_VERSION..."
+        git tag -a "v$NEW_VERSION" -m "Patch release v$NEW_VERSION"
+        git push origin "v$NEW_VERSION"
+        echo "✅ Patch release tag v$NEW_VERSION pushed!"
+        echo "🚀 Check GitHub Actions: https://github.com/{{.GITHUB_REPO}}/actions"
+
+  release:minor:
+    desc: Create a minor release (increment minor version)
+    cmds:
+      - task: release:check
+      - |
+        CURRENT_VERSION=$(task release:current)
+        echo "Current version: v$CURRENT_VERSION"
+
+        # Parse version components
+        MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+        MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+
+        # Increment minor version, reset patch to 0
+        NEW_MINOR=$((MINOR + 1))
+        NEW_VERSION="$MAJOR.$NEW_MINOR.0"
+
+        echo "New minor version: v$NEW_VERSION"
+        echo ""
+        echo "This will:"
+        echo "  1. Create and push tag v$NEW_VERSION"
+        echo "  2. Trigger GitHub Actions to create the release"
+        echo "  3. Automatically update script versions"
+        echo ""
+        read -p "Continue with minor release? (y/N): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+          echo "Release cancelled"
+          exit 1
+        fi
+
+        echo "Creating minor release v$NEW_VERSION..."
+        git tag -a "v$NEW_VERSION" -m "Minor release v$NEW_VERSION"
+        git push origin "v$NEW_VERSION"
+        echo "✅ Minor release tag v$NEW_VERSION pushed!"
+        echo "🚀 Check GitHub Actions: https://github.com/{{.GITHUB_REPO}}/actions"
+
+  release:major:
+    desc: Create a major release (increment major version)
+    cmds:
+      - task: release:check
+      - |
+        CURRENT_VERSION=$(task release:current)
+        echo "Current version: v$CURRENT_VERSION"
+
+        # Parse version components
+        MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+
+        # Increment major version, reset minor and patch to 0
+        NEW_MAJOR=$((MAJOR + 1))
+        NEW_VERSION="$NEW_MAJOR.0.0"
+
+        echo "New major version: v$NEW_VERSION"
+        echo ""
+        echo "⚠️  MAJOR RELEASE - This indicates breaking changes!"
+        echo ""
+        echo "This will:"
+        echo "  1. Create and push tag v$NEW_VERSION"
+        echo "  2. Trigger GitHub Actions to create the release"
+        echo "  3. Automatically update script versions"
+        echo ""
+        read -p "Continue with MAJOR release? (y/N): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+          echo "Release cancelled"
+          exit 1
+        fi
+
+        echo "Creating major release v$NEW_VERSION..."
+        git tag -a "v$NEW_VERSION" -m "Major release v$NEW_VERSION"
+        git push origin "v$NEW_VERSION"
+        echo "✅ Major release tag v$NEW_VERSION pushed!"
+        echo "🚀 Check GitHub Actions: https://github.com/{{.GITHUB_REPO}}/actions"
+
+  release:info:
+    desc: Show current version and release options
+    cmds:
+      - |
+        CURRENT_VERSION=$(task release:current)
+        echo "🏷️  Current Version: v$CURRENT_VERSION"
+        echo ""
+        echo "📋 Release Options:"
+        echo "  task release:patch   → v$(echo $CURRENT_VERSION | awk -F. '{print $1"."$2"."($3+1)}')"
+        echo "  task release:minor   → v$(echo $CURRENT_VERSION | awk -F. '{print $1"."($2+1)".0"}')"
+        echo "  task release:major   → v$(echo $CURRENT_VERSION | awk -F. '{print ($1+1)".0.0"}')"
+        echo ""
+        echo "🔄 Other Options:"
+        echo "  task release:create VERSION=x.y.z  → Custom version"
+        echo "  task release:manual                → GitHub UI release"
+        echo ""
+        echo "ℹ️  Note: All releases trigger automatic GitHub Actions workflows"
+        echo "   that will update script versions and create GitHub releases."
+
+  # Dependabot tasks
+  deps:status:
+    desc: Check Dependabot status and recent PRs
+    cmds:
+      - |
+        echo "📦 Dependabot Status for {{.GITHUB_REPO}}"
+        echo "================================="
+        echo ""
+        echo "🔍 Recent Dependabot PRs:"
+        gh pr list --author "dependabot[bot]" --limit 5 \
+          --json number,title,state,updatedAt \
+          --template '{{range .}}PR #{{.number}}: {{.title}} ({{.state}}) - {{.updatedAt}}{{"\n"}}{{end}}' || \
+          echo "GitHub CLI not available or not authenticated"
+        echo ""
+        echo "📋 Dependabot Configuration:"
+        echo "  - GitHub Actions: Weekly (Mondays)"
+        echo "  - Docker: Weekly (Tuesdays)"
+        echo "  - Python/Pre-commit: Weekly (Wednesdays)"
+        echo ""
+        echo "🤖 Auto-merge enabled for patch/minor updates"
+        echo "⚠️  Major updates require manual review"
+
+  deps:check:
+    desc: Check for dependency updates manually
+    cmds:
+      - |
+        echo "🔍 Checking for dependency updates..."
+        echo ""
+        echo "GitHub Actions:"
+        grep -r "uses:" .github/workflows/ | grep -v "#" | sort | uniq
+        echo ""
+        echo "Docker Images:"
+        grep -r "FROM" Dockerfile* docker-compose*.yml | grep -v "#" | sort | uniq
+        echo ""
+        echo "Python Dependencies:"
+        cat requirements.txt | grep -v "#" | grep -v "^$"
+
+  deps:security:
+    desc: Check for security vulnerabilities in dependencies
+    cmds:
+      - |
+        echo "🔒 Security Check"
+        echo "================="
+        echo ""
+        echo "Checking GitHub Advisory Database..."
+        gh api repos/{{.GITHUB_REPO}}/vulnerability-alerts || echo "No security alerts or GitHub CLI not available"
+        echo ""
+        echo "💡 Tip: Enable Dependabot security updates in repository settings"
 
   # Documentation tasks
   docs:readme:

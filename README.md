@@ -1,16 +1,20 @@
 # Database Helper Scripts
 
-A collection of production-ready PostgreSQL database management scripts for backup, restore, user management, and database copying operations.
+A collection of production-ready PostgreSQL database management scripts for backup, restore, user management,
+and database copying operations.
 
 ## Overview
 
 This repository contains three powerful bash scripts:
 
-- **`db-backup-restore`** - Backup and restore functionality with compression, filtering, and validation
+- **`db-backup-restore`** - Backup and restore functionality with compression, filtering,
+  and validation
 - **`db-user-manager`** - User and permission management system
-- **`db-copy`** - Database copying/cloning with schema/data filtering and cross-server support
+- **`db-copy`** - Database copying/cloning with schema/data filtering and cross-server
+  support
 
-All scripts include comprehensive error handling, logging, security validation, and support for complex database environments.
+All scripts include comprehensive error handling, logging, security validation, and support for complex
+database environments.
 
 ## Prerequisites
 
@@ -23,11 +27,14 @@ All scripts include comprehensive error handling, logging, security validation, 
 
 These scripts are designed to work seamlessly on both **macOS** and **Linux**:
 
-- **macOS**: Uses BSD variants of system utilities by default, with automatic fallback to GNU versions if installed via Homebrew (e.g., `gstat`, `gtimeout`)
+- **macOS**: Uses BSD variants of system utilities by default, with automatic fallback to GNU
+  versions if installed via Homebrew (e.g., `gstat`, `gtimeout`)
 - **Linux**: Uses GNU variants of system utilities natively
-- **Cross-platform features**: Automatic detection and handling of platform differences for commands like `stat`, `timeout`, `date`, and `sed`
+- **Cross-platform features**: Automatic detection and handling of platform differences for
+  commands like `stat`, `timeout`, `date`, and `sed`
 
 For optimal compatibility on macOS, consider installing GNU utilities:
+
 ```bash
 # macOS: Install GNU utilities for enhanced compatibility
 brew install coreutils findutils gnu-sed
@@ -55,17 +62,20 @@ source ~/.bashrc
 ### Manual Installation
 
 1. Clone the repository:
+
    ```bash
    git clone <repository-url>
    cd db-helper-scripts
    ```
 
 2. Make scripts executable:
+
    ```bash
    chmod +x db-backup-restore db-user-manager db-copy
    ```
 
 3. Optionally add to PATH:
+
    ```bash
    sudo ln -s $PWD/db-backup-restore /usr/local/bin/
    sudo ln -s $PWD/db-user-manager /usr/local/bin/
@@ -174,6 +184,7 @@ Each script includes built-in management commands:
 ## Common Tasks
 
 ### Production Backup
+
 ```bash
 # Full backup with compression and validation
 ./db-backup-restore backup \
@@ -183,6 +194,7 @@ Each script includes built-in management commands:
 ```
 
 ### Development Environment Setup
+
 ```bash
 # 1. Copy production to staging (excluding sensitive data)
 ./db-copy copy \
@@ -200,6 +212,7 @@ Each script includes built-in management commands:
 ```
 
 ### Database Migration
+
 ```bash
 # 1. Backup source database
 ./db-backup-restore backup -H old-server.com -U postgres -d legacy_app \
@@ -221,6 +234,7 @@ Each script includes built-in management commands:
 ## Advanced Features
 
 ### Backup & Restore Options
+
 - **Compression**: gzip, bzip2, lz4 with custom levels
 - **Filtering**: Include/exclude tables, schemas, or data
 - **Parallel processing**: Multi-job backup/restore
@@ -228,6 +242,7 @@ Each script includes built-in management commands:
 - **Monitoring**: Progress tracking, metrics, and webhook notifications
 
 ### Database Copy Features
+
 - **Flexible copying**: Schema-only, data-only, or full copy
 - **Cross-server support**: Copy between different PostgreSQL servers
 - **Table filtering**: Include/exclude specific tables or patterns
@@ -235,6 +250,7 @@ Each script includes built-in management commands:
 - **Validation**: Verify copy integrity and performance
 
 ### User Management Features
+
 - **User lifecycle**: Create, modify, lock, unlock, delete users
 - **Permission management**: Grant/revoke table, schema, and database permissions
 - **Role management**: Create and assign roles
@@ -244,6 +260,7 @@ Each script includes built-in management commands:
 ## Configuration
 
 ### Environment Variables
+
 ```bash
 export DATABASE_URL="postgresql://user:password@localhost:5432/dbname"
 export PGPASSWORD="your_password"
@@ -251,6 +268,7 @@ export PGSSLMODE="require"
 ```
 
 ### Configuration Files
+
 ```bash
 # Save/load configuration
 ./db-backup-restore backup --save-config database.conf
@@ -259,7 +277,8 @@ export PGSSLMODE="require"
 
 ## Testing
 
-This repository includes a comprehensive test suite using Docker and bats (Bash Automated Testing System). The test suite provides:
+This repository includes a comprehensive test suite using Docker and bats (Bash Automated Testing
+System). The test suite provides:
 
 - **Isolated testing environment** with Docker PostgreSQL containers
 - **Comprehensive coverage** of all script features and edge cases
@@ -270,6 +289,7 @@ This repository includes a comprehensive test suite using Docker and bats (Bash 
 ### Running Tests
 
 #### Option 1: Local Testing (Install Dependencies)
+
 ```bash
 # Setup test environment (installs bats and dependencies)
 cd tests && ./setup-tests.sh
@@ -283,6 +303,7 @@ cd tests && ./setup-tests.sh
 ```
 
 #### Option 2: Docker Testing (No Local Dependencies)
+
 ```bash
 # Run tests in Docker container (no setup required)
 ./run-tests --docker
@@ -295,12 +316,15 @@ docker-compose -f docker-compose.test-runner.yml run test-runner ./run-tests
 ```
 
 #### Platform-Specific Setup
+
 - **macOS**: Uses Homebrew for dependencies (brew install bats-core coreutils)
 - **Linux**: Uses package managers (apt, yum, dnf) for dependencies
 - **Both**: Automatic detection of GNU vs BSD utilities for compatibility
 
 #### Test Database Ports
+
 Tests use non-standard ports to avoid conflicts with existing PostgreSQL instances:
+
 - **Primary test database**: port 15432
 - **Secondary test database**: port 15433
 
@@ -366,21 +390,25 @@ task benchmark
 ### Common Issues
 
 1. **Connection Failures**
+
    ```bash
    ./db-backup-restore backup --connection-timeout 10 -v
    ```
 
 2. **Permission Errors**
+
    ```bash
    ./db-user-manager create-user -v --target-user newuser
    ```
 
 3. **Disk Space Issues**
+
    ```bash
    ./db-backup-restore backup --no-disk-check
    ```
 
 ### Debugging
+
 ```bash
 # Enable verbose logging
 ./db-backup-restore backup -v --log-file detailed.log
@@ -425,6 +453,7 @@ Each script includes comprehensive help:
 ## Contributing
 
 When contributing:
+
 1. Maintain backward compatibility
 2. Add appropriate error handling and validation
 3. Update help documentation

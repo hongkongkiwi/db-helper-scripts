@@ -1,6 +1,7 @@
 # Database Helper Scripts Test Suite
 
-A comprehensive test suite for the database helper scripts using bats (Bash Automated Testing System) and Docker for isolated PostgreSQL testing environments.
+A comprehensive test suite for the database helper scripts using bats (Bash Automated Testing System) and Docker for
+isolated PostgreSQL testing environments.
 
 ## Overview
 
@@ -10,7 +11,8 @@ This test suite provides end-to-end testing for three database helper scripts:
 - **`db-user-manager`** - User and permission management testing
 - **`db-copy`** - Database copying and cloning testing
 
-The tests use Docker containers to provide isolated PostgreSQL instances for safe, repeatable testing without affecting any existing databases.
+The tests use Docker containers to provide isolated PostgreSQL instances for safe, repeatable testing without affecting
+any existing databases.
 
 ## Features
 
@@ -29,6 +31,7 @@ Before running the tests, ensure you have the following installed:
 ### Required Software
 
 1. **Docker** - For PostgreSQL test containers
+
    ```bash
    # Verify Docker is installed and running
    docker --version
@@ -36,6 +39,7 @@ Before running the tests, ensure you have the following installed:
    ```
 
 2. **Docker Compose** - For multi-container test environment
+
    ```bash
    # Verify Docker Compose is available
    docker-compose --version
@@ -44,6 +48,7 @@ Before running the tests, ensure you have the following installed:
    ```
 
 3. **PostgreSQL Client Tools** - For database operations
+
    ```bash
    # Required tools
    psql --version
@@ -54,6 +59,7 @@ Before running the tests, ensure you have the following installed:
    ```
 
 4. **Bash 4.0+** - For script execution
+
    ```bash
    bash --version
    ```
@@ -61,6 +67,7 @@ Before running the tests, ensure you have the following installed:
 ### Installation Commands
 
 **Ubuntu/Debian:**
+
 ```bash
 # Install Docker
 sudo apt-get update
@@ -74,6 +81,7 @@ sudo apt-get install git
 ```
 
 **macOS:**
+
 ```bash
 # Install Docker Desktop from https://docker.com/products/docker-desktop
 # OR using Homebrew
@@ -87,6 +95,7 @@ git --version
 ```
 
 **RHEL/CentOS:**
+
 ```bash
 # Install Docker
 sudo yum install docker docker-compose
@@ -101,6 +110,7 @@ sudo yum install git
 ## Setup
 
 1. **Run the setup script** to install bats and prepare the testing environment:
+
    ```bash
    cd tests
    chmod +x setup-tests.sh
@@ -116,6 +126,7 @@ sudo yum install git
    - Validate the test environment
 
 2. **Verify setup** by checking the installation:
+
    ```bash
    # Verify bats is installed
    bats --version
@@ -129,6 +140,7 @@ sudo yum install git
 ### Quick Start
 
 Run all tests with default settings:
+
 ```bash
 # From project root
 ./run-tests
@@ -207,7 +219,7 @@ docker-compose -f docker-compose.test.yml down -v
 
 ### Directory Structure
 
-```
+```text
 tests/
 ├── scripts/                    # Main test files
 │   ├── test_db_backup_restore.bats
@@ -252,6 +264,7 @@ The test suite creates a multi-container Docker environment:
 ### Test Data
 
 Each test database is initialized with:
+
 - Multiple test tables (`users`, `orders`, `products`, etc.)
 - Sample data for testing
 - Multiple schemas (`public`, `test_schema`)
@@ -264,12 +277,14 @@ Each test database is initialized with:
 ### db-copy Script Tests
 
 **Basic Operations:**
+
 - Help and version commands
 - Basic same-server database copying
 - Schema-only and data-only copying
 - Cross-server database copying
 
 **Advanced Features:**
+
 - Table and schema filtering
 - Parallel processing
 - Fast template copying
@@ -278,6 +293,7 @@ Each test database is initialized with:
 - Performance optimizations
 
 **Error Handling:**
+
 - Invalid source databases
 - Connection failures
 - Existing target databases
@@ -286,6 +302,7 @@ Each test database is initialized with:
 ### db-backup-restore Script Tests
 
 **Backup Operations:**
+
 - Basic database backup
 - Schema-only and data-only backups
 - Multiple compression formats (gzip, bzip2)
@@ -294,6 +311,7 @@ Each test database is initialized with:
 - Parallel backup processing
 
 **Restore Operations:**
+
 - Basic database restore
 - Compressed backup restore
 - Custom format restore
@@ -301,6 +319,7 @@ Each test database is initialized with:
 - Clean restore options
 
 **Utility Features:**
+
 - Backup listing
 - Validation
 - Progress reporting
@@ -309,12 +328,14 @@ Each test database is initialized with:
 ### db-user-manager Script Tests
 
 **User Management:**
+
 - User creation with various options
 - User listing and detailed information
 - User deletion
 - Password management
 
 **Permission Management:**
+
 - Database access granting
 - Table-level permissions
 - Schema-level permissions
@@ -322,6 +343,7 @@ Each test database is initialized with:
 - Permission display
 
 **Advanced Features:**
+
 - Role management
 - Connection limits
 - User locking/unlocking
@@ -336,6 +358,7 @@ Each test database is initialized with:
 Common functions for all tests:
 
 **Database Operations:**
+
 - `wait_for_database()` - Wait for database to be ready
 - `database_exists()` - Check if database exists
 - `table_exists()` - Check if table exists
@@ -343,11 +366,13 @@ Common functions for all tests:
 - `execute_sql()` - Execute SQL commands
 
 **File Operations:**
+
 - `assert_file_exists()` - Verify file exists
 - `file_contains()` - Check file content
 - `get_file_size()` - Get file size
 
 **Test Management:**
+
 - `setup_test_environment()` - Initialize test environment
 - `cleanup_test_databases()` - Clean up test databases
 - `reset_test_data()` - Reset to known data state
@@ -355,6 +380,7 @@ Common functions for all tests:
 ### Assertions
 
 Using bats-assert library:
+
 - `assert_success` - Command succeeded
 - `assert_failure` - Command failed
 - `assert_output` - Check command output
@@ -399,6 +425,7 @@ You can customize the test environment by:
 ### Common Issues
 
 1. **Docker not running**
+
    ```bash
    # Start Docker daemon
    sudo systemctl start docker
@@ -407,20 +434,22 @@ You can customize the test environment by:
    ```
 
 2. **Port conflicts**
+
    ```bash
    # Check what's using ports 15432/15433 (test databases)
-lsof -i :15432
-lsof -i :15433
+   lsof -i :15432
+   lsof -i :15433
 
-# Check standard PostgreSQL ports (might conflict)
-lsof -i :5432
-lsof -i :5433
+   # Check standard PostgreSQL ports (might conflict)
+   lsof -i :5432
+   lsof -i :5433
 
    # Stop conflicting services
    sudo systemctl stop postgresql
    ```
 
 3. **PostgreSQL client tools missing**
+
    ```bash
    # Install PostgreSQL client
    # Ubuntu: sudo apt-get install postgresql-client
@@ -429,6 +458,7 @@ lsof -i :5433
    ```
 
 4. **Permission errors**
+
    ```bash
    # Make scripts executable
    chmod +x db-backup-restore db-user-manager db-copy
@@ -436,6 +466,7 @@ lsof -i :5433
    ```
 
 5. **Disk space issues**
+
    ```bash
    # Clean up Docker
    docker system prune -a
@@ -448,6 +479,7 @@ lsof -i :5433
 ### Debugging Tests
 
 **Verbose output:**
+
 ```bash
 # Run tests with detailed output
 bats --verbose scripts/test_db_copy.bats
@@ -457,6 +489,7 @@ bats --verbose --filter "basic same-server" scripts/test_db_copy.bats
 ```
 
 **Manual database inspection:**
+
 ```bash
 # Connect to test database
 docker-compose -f docker-compose.test.yml exec postgres-primary \
@@ -467,6 +500,7 @@ docker-compose -f docker-compose.test.yml logs postgres-primary
 ```
 
 **Test environment state:**
+
 ```bash
 # Check Docker containers
 docker-compose -f docker-compose.test.yml ps
@@ -481,11 +515,13 @@ ls -la /tmp/test_backups/
 ### Optimizing Test Execution
 
 1. **Parallel execution:**
+
    ```bash
    ./run-tests --parallel 4
    ```
 
 2. **Skip Docker setup:**
+
    ```bash
    # Start containers once
    docker-compose -f docker-compose.test.yml up -d
@@ -495,6 +531,7 @@ ls -la /tmp/test_backups/
    ```
 
 3. **Run specific tests:**
+
    ```bash
    # Test only what you're working on
    bats scripts/test_db_copy.bats --filter "schema-only"
@@ -503,6 +540,7 @@ ls -la /tmp/test_backups/
 ### Test Execution Times
 
 Typical execution times (varies by system):
+
 - Individual test: 1-5 seconds
 - Full script test suite: 30-60 seconds
 - All tests: 2-5 minutes
@@ -513,11 +551,13 @@ Typical execution times (varies by system):
 ### Adding New Tests
 
 1. **Follow naming convention:**
+
    ```bash
    @test "script-name: feature description"
    ```
 
 2. **Use helper functions:**
+
    ```bash
    setup() {
        setup_test_environment
@@ -529,6 +569,7 @@ Typical execution times (varies by system):
    ```
 
 3. **Test structure:**
+
    ```bash
    @test "description" {
        # Setup
@@ -545,6 +586,7 @@ Typical execution times (varies by system):
    ```
 
 4. **Error testing:**
+
    ```bash
    @test "error condition" {
        run_script_cmd invalid_params
@@ -660,6 +702,7 @@ The testing framework has been significantly enhanced to provide comprehensive c
 ### **🛡️ Enhanced Validation Framework**
 
 #### **db-copy Comprehensive Validation:**
+
 ```bash
 # Same server/database detection
 if [[ "$SRC_DB_NAME" == "$TARGET_DB_NAME" && same_server ]]; then
@@ -688,6 +731,7 @@ fi
 ```
 
 #### **db-user-manager Security Validation:**
+
 ```bash
 # Reserved user prevention
 RESERVED_USERS=("postgres" "template0" "template1" "replication" "root" "admin" "public")
@@ -712,6 +756,7 @@ fi
 ```
 
 #### **db-backup-restore Safety Validation:**
+
 ```bash
 # System database protection
 SYSTEM_DBS=("template0" "template1" "postgres")
@@ -735,6 +780,7 @@ fi
 #### **Edge Case Testing (40+ New Tests):**
 
 **db-copy Edge Cases:**
+
 - ✅ Same server/same database prevention
 - ✅ Template copy validation across servers
 - ✅ Sync mode conflict detection
@@ -746,6 +792,7 @@ fi
 - ✅ Connection timeout handling
 
 **db-user-manager Edge Cases:**
+
 - ✅ Reserved user name blocking (postgres, template0, public, etc.)
 - ✅ Password strength validation
 - ✅ Superuser creation warnings
@@ -756,6 +803,7 @@ fi
 - ✅ Role assignment validation
 
 **db-backup-restore Edge Cases:**
+
 - ✅ System database backup warnings
 - ✅ Backup directory permission validation
 - ✅ Format/compression compatibility
@@ -795,6 +843,7 @@ fi
 ### **🚀 Running Enhanced Tests**
 
 #### **Complete Test Suite:**
+
 ```bash
 # Run all enhanced tests with coverage
 ./run-tests --coverage-report --performance-report
@@ -810,6 +859,7 @@ fi
 ```
 
 #### **Test Coverage Reports:**
+
 ```bash
 # Generate detailed coverage report
 ./run-tests --coverage-report --output coverage_report.html
@@ -833,6 +883,7 @@ fi
 ### **🛠️ Enhanced Test Runner Features**
 
 #### **New Capabilities:**
+
 - ✅ **Coverage Reporting**: Detailed test coverage analysis
 - ✅ **Performance Metrics**: Execution time tracking
 - ✅ **Retry Logic**: Automatic retry of failed tests
@@ -842,6 +893,7 @@ fi
 - ✅ **CI/CD Integration**: GitHub Actions & GitLab CI ready
 
 #### **Usage Examples:**
+
 ```bash
 # Comprehensive testing with all features
 ./run-tests \
@@ -867,6 +919,7 @@ fi
 #### **Common Issues:**
 
 1. **Same Database Copy Test Failures:**
+
    ```bash
    # Ensure database names are different
    TEST_DB_PRIMARY="testdb"
@@ -874,12 +927,14 @@ fi
    ```
 
 2. **Reserved User Test Failures:**
+
    ```bash
    # Check PostgreSQL version compatibility
    psql --version  # Should be 10+
    ```
 
 3. **SSL Validation Test Failures:**
+
    ```bash
    # Generate test SSL certificates
    openssl req -new -x509 -days 365 -nodes -text \
@@ -887,6 +942,7 @@ fi
    ```
 
 4. **Permission Test Failures:**
+
    ```bash
    # Ensure test user has appropriate permissions
    GRANT CREATE ON DATABASE testdb TO testuser;
@@ -895,6 +951,7 @@ fi
 ### **📈 Performance Optimizations**
 
 #### **Test Execution Improvements:**
+
 - ⚡ **40% faster** with parallel execution
 - 🔄 **Smart retry logic** for flaky tests
 - 📊 **Real-time progress** monitoring
@@ -902,6 +959,7 @@ fi
 - 💾 **Resource optimization** for Docker containers
 
 #### **Memory & CPU Optimization:**
+
 ```bash
 # Optimized Docker configuration
 services:
@@ -915,6 +973,7 @@ services:
 ### **🔮 Future Enhancements**
 
 #### **Planned Improvements:**
+
 - 🤖 **AI-powered test generation** for edge cases
 - 🔐 **Advanced security testing** framework
 - 📡 **Real-time monitoring** integration
@@ -924,6 +983,7 @@ services:
 ### **🏆 Quality Metrics**
 
 #### **Code Quality Improvements:**
+
 - ✅ **99.2% test coverage** across all scripts
 - ✅ **Zero critical vulnerabilities** detected
 - ✅ **100% edge case coverage** for core functions
@@ -933,12 +993,14 @@ services:
 ## 📚 **Additional Resources**
 
 ### **Documentation:**
+
 - [Advanced Testing Guide](ADVANCED_TESTING.md)
 - [Edge Case Playbook](EDGE_CASES.md)
 - [Security Testing Guide](SECURITY_TESTING.md)
 - [Performance Tuning](PERFORMANCE.md)
 
 ### **Integration Examples:**
+
 - [GitHub Actions Workflow](.github/workflows/test.yml)
 - [GitLab CI Configuration](.gitlab-ci.yml)
 - [Jenkins Pipeline](jenkins/Jenkinsfile)
@@ -955,4 +1017,5 @@ With these comprehensive improvements, our database helper scripts now have:
 - **🔐 Security hardened** against common vulnerabilities
 - **📊 Enterprise-grade** reporting and monitoring
 
-**Result**: Production-ready database management tools with comprehensive safety nets and validation that prevent costly mistakes and security issues.
+**Result**: Production-ready database management tools with comprehensive safety nets and validation that prevent costly
+mistakes and security issues.

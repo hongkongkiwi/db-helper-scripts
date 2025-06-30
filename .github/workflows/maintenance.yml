@@ -1,0 +1,217 @@
+name: Maintenance
+
+"on":
+  schedule:
+    # Run weekly on Sundays at 6 AM UTC
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Maintenance task to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - security-scan
+          - dependency-check
+          - cleanup
+
+jobs:
+  maintenance:
+    name: Automated Maintenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bats
+
+      - name: Security scan
+        if: github.event.inputs.task == 'security-scan' || github.event.inputs.task == 'all' || github.event_name == 'schedule'
+        run: |
+          echo "Running security scans..."
+
+          # Check for potential security issues in shell scripts
+          echo "Checking for hardcoded secrets..."
+          if grep -r -E "(password|token|secret|key|api_key)\s*=\s*['\"][^'\"]*['\"]" . \
+              --include="*.sh" --include="*.bash" \
+              --exclude-dir=.git --exclude-dir=tests --exclude-dir=.github; then
+            echo "⚠️ Potential hardcoded secrets found!"
+          else
+            echo "✅ No hardcoded secrets detected"
+          fi
+
+          # Check for unsafe shell practices
+          echo "Checking for unsafe shell practices..."
+          if grep -r "eval\|exec\|\$(" . --include="*.sh" --include="*.bash" \
+            --exclude-dir=.git --exclude-dir=tests --exclude-dir=.github | \
+            grep -v "# shellcheck" | head -10; then
+            echo "⚠️ Found potentially unsafe shell practices (review needed)"
+          else
+            echo "✅ No obvious unsafe shell practices found"
+          fi
+
+      - name: Dependency check
+        if: github.event.inputs.task == 'dependency-check' || github.event.inputs.task == 'all' || github.event_name == 'schedule'
+        run: |
+          echo "Checking system dependencies..."
+
+          # Check if all required tools are mentioned in README
+          tools="psql pg_dump pg_restore createdb dropdb gzip bzip2 lz4 shellcheck bats"
+          for tool in $tools; do
+            if grep -q "$tool" README.md; then
+              echo "✅ $tool documented in README"
+            else
+              echo "⚠️ $tool not documented in README"
+            fi
+          done
+
+          # Check for Docker base image updates
+          if [ -f "Dockerfile.test" ]; then
+            echo "Checking Docker base image..."
+            base_image=$(grep "^FROM" Dockerfile.test | head -1 | awk '{print $2}')
+            echo "Current base image: $base_image"
+          fi
+
+      - name: Code quality check
+        if: github.event.inputs.task == 'all' || github.event_name == 'schedule'
+        run: |
+          echo "Running code quality checks..."
+
+          # Run shellcheck on all scripts
+          echo "Running ShellCheck..."
+          shellcheck_errors=0
+          for script in db-backup-restore db-copy db-user-manager run-tests; do
+            if ! shellcheck "$script"; then
+              shellcheck_errors=$((shellcheck_errors + 1))
+            fi
+          done
+
+          if [ $shellcheck_errors -eq 0 ]; then
+            echo "✅ All scripts pass ShellCheck"
+          else
+            echo "⚠️ $shellcheck_errors scripts have ShellCheck warnings"
+          fi
+
+          # Check script permissions
+          echo "Checking script permissions..."
+          for script in db-backup-restore db-copy db-user-manager run-tests; do
+            if [ -x "$script" ]; then
+              echo "✅ $script is executable"
+            else
+              echo "⚠️ $script is not executable"
+            fi
+          done
+
+      - name: Documentation check
+        if: github.event.inputs.task == 'all' || github.event_name == 'schedule'
+        run: |
+          echo "Checking documentation consistency..."
+
+          # Check if script versions match README
+          for script in db-backup-restore db-copy db-user-manager; do
+            script_version=$(grep "SCRIPT_VERSION=" "$script" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            if grep -q "$script.*v$script_version" README.md; then
+              echo "✅ $script version $script_version matches README"
+            else
+              echo "⚠️ $script version $script_version not found in README"
+            fi
+          done
+
+          # Check for broken links in README (basic check)
+          if grep -E "https?://[^\\s]+" README.md > /dev/null; then
+            echo "✅ README contains links (manual verification recommended)"
+          fi
+
+      - name: Performance check
+        if: github.event.inputs.task == 'all' || github.event_name == 'schedule'
+        run: |
+          echo "Running basic performance checks..."
+
+          # Time help command execution
+          for script in db-backup-restore db-copy db-user-manager; do
+            echo "Testing $script help performance..."
+            time timeout 10s ./"$script" help > /dev/null 2>&1 || echo "Help command for $script took too long or failed"
+          done
+
+      - name: Cleanup
+        if: github.event.inputs.task == 'cleanup' || github.event.inputs.task == 'all' || github.event_name == 'schedule'
+        run: |
+          echo "Running cleanup tasks..."
+
+          # Clean up any temporary files that might have been left behind
+          find . -name "*.tmp" -o -name "temp_*" -o -name ".DS_Store" | head -10
+
+          # Check for large files that shouldn't be in the repo
+          echo "Checking for unexpectedly large files..."
+          find . -type f -size +1M -not -path "./.git/*" | head -5
+
+      - name: Generate maintenance report
+        run: |
+          cat > maintenance-report.md << 'EOF'
+          # Maintenance Report
+
+          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Workflow:** ${{ github.workflow }}
+          **Run ID:** ${{ github.run_id }}
+
+          ## Summary
+
+          - Security scan: ✅ Completed
+          - Dependency check: ✅ Completed
+          - Code quality check: ✅ Completed
+          - Documentation check: ✅ Completed
+          - Performance check: ✅ Completed
+          - Cleanup: ✅ Completed
+
+          ## Recommended Actions
+
+          1. Review any warnings or errors reported above
+          2. Update dependencies if newer versions are available
+          3. Address any ShellCheck warnings
+          4. Verify script permissions are correct
+          5. Update documentation if versions have changed
+
+          EOF
+
+      - name: Upload maintenance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: maintenance-report-${{ github.run_number }}
+          path: maintenance-report.md
+          retention-days: 30
+
+      - name: Create issue for critical findings
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `🔧 Maintenance Issues Found - ${new Date().toISOString().split('T')[0]}`;
+            const body = `
+            The automated maintenance workflow has detected issues that require attention.
+
+            **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Please review the workflow logs and address any critical findings.
+
+            This issue was automatically created by the maintenance workflow.
+            `;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['maintenance', 'automated']
+            });
