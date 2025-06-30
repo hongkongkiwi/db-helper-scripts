@@ -41,54 +41,21 @@ All scripts include comprehensive error handling, logging, security validation, 
 
 ## Development Setup
 
-For contributors and developers working on this project:
-
 ### Pre-commit Hooks
 
-This project uses pre-commit hooks to ensure code quality:
+This project uses pre-commit hooks to maintain code quality:
 
 ```bash
-# Install pre-commit (if not already installed)
+# Install pre-commit
 pip install pre-commit
-# OR on macOS: brew install pre-commit
 
-# Install the git hook scripts
+# Install the hooks for this repo
 pre-commit install
 
-# Run hooks on all files (optional)
-pre-commit run --all-files
+# That's it! Hooks will run automatically on each commit
 ```
 
-The pre-commit configuration includes:
-- **Code formatting**: Trailing whitespace removal, end-of-file fixing
-- **Shell script linting**: Shellcheck analysis for bash scripts
-- **Permission checks**: Ensures scripts are executable
-- **Syntax validation**: YAML and JSON syntax checking
-- **Script validation**: Help commands and README link validation
-
-### Development Workflow
-
-```bash
-# 1. Make your changes
-vim db-backup-restore
-
-# 2. Test your changes
-./run-tests --test "*backup*" --verbose
-
-# 3. Pre-commit hooks will run automatically on commit
-git add -A
-git commit -m "Your changes"  # Pre-commit hooks run here
-
-# 4. If hooks fail, fix issues and try again
-git add -A
-git commit -m "Your changes"
-```
-
-The pre-commit hooks will automatically:
-- Fix formatting issues
-- Check shell script quality
-- Validate script permissions
-- Run basic smoke tests
+The hooks will automatically check shell script quality, fix formatting, and validate permissions before each commit.
 
 ## Quick Start
 
