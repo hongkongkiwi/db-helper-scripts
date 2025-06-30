@@ -58,14 +58,14 @@ run_db_copy_cmd() {
 
 # Test basic database copying
 @test "db-copy: basic same-server database copy" {
-    # Create target database
+    # Create target database first (db-copy will drop and recreate it)
     create_test_database "$TEST_HOST_PRIMARY" "$TEST_PORT_PRIMARY" "$TEST_USER_PRIMARY" "test_copy_target" "$TEST_PASS_PRIMARY"
 
-    # Run copy command
+    # Run copy command with --drop-target to handle existing database
     run_db_copy_cmd copy \
         -H "$TEST_HOST_PRIMARY" -p "$TEST_PORT_PRIMARY" -U "$TEST_USER_PRIMARY" \
         -d "$TEST_DB_PRIMARY" --target-dbname test_copy_target \
-        --skip-confirmation
+        --drop-target --skip-confirmation
 
     assert_success
 
@@ -80,14 +80,14 @@ run_db_copy_cmd() {
 }
 
 @test "db-copy: schema-only copy" {
-    # Create target database
+    # Create target database first (db-copy will drop and recreate it)
     create_test_database "$TEST_HOST_PRIMARY" "$TEST_PORT_PRIMARY" "$TEST_USER_PRIMARY" "test_schema_only" "$TEST_PASS_PRIMARY"
 
-    # Run schema-only copy
+    # Run schema-only copy with --drop-target
     run_db_copy_cmd copy \
         -H "$TEST_HOST_PRIMARY" -p "$TEST_PORT_PRIMARY" -U "$TEST_USER_PRIMARY" \
         -d "$TEST_DB_PRIMARY" --target-dbname test_schema_only \
-        --schema-only --skip-confirmation
+        --schema-only --drop-target --skip-confirmation
 
     assert_success
 
@@ -123,16 +123,16 @@ run_db_copy_cmd() {
 
 # Test cross-server copying
 @test "db-copy: cross-server database copy" {
-    # Create target database on secondary server
+    # Create target database on secondary server first
     create_test_database "$TEST_HOST_SECONDARY" "$TEST_PORT_SECONDARY" "$TEST_USER_SECONDARY" "test_cross_server" "$TEST_PASS_SECONDARY"
 
-    # Run cross-server copy
+    # Run cross-server copy with --drop-target
     run_db_copy_cmd copy \
         --src-host "$TEST_HOST_PRIMARY" --src-port "$TEST_PORT_PRIMARY" \
         --src-user "$TEST_USER_PRIMARY" --src-dbname "$TEST_DB_PRIMARY" \
         --target-host "$TEST_HOST_SECONDARY" --target-port "$TEST_PORT_SECONDARY" \
         --target-user "$TEST_USER_SECONDARY" --target-dbname test_cross_server \
-        --skip-confirmation
+        --drop-target --skip-confirmation
 
     assert_success
 

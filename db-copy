@@ -854,7 +854,7 @@ copy_full_database() {
 
     # Dump database
     log_verbose "Dumping database from source"
-    if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" "$temp_file"; then
+    if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" -f "$temp_file"; then
         log_error "Failed to dump database from source"
         exit "$EXIT_COPY_ERROR"
     fi

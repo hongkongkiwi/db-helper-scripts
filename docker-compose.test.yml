@@ -51,17 +51,22 @@ services:
       dockerfile: Dockerfile.test
     container_name: db-test-runner
     environment:
-      PGHOST_PRIMARY: postgres-primary
-      PGPORT_PRIMARY: 5432
-      PGUSER_PRIMARY: testuser
-      PGPASSWORD_PRIMARY: testpass
-      PGDATABASE_PRIMARY: testdb
+      # Primary database configuration (matching test_helpers.bash)
+      TEST_HOST_PRIMARY: postgres-primary
+      TEST_PORT_PRIMARY: 5432
+      TEST_USER_PRIMARY: testuser
+      TEST_PASS_PRIMARY: testpass
+      TEST_DB_PRIMARY: testdb
 
-      PGHOST_SECONDARY: postgres-secondary
-      PGPORT_SECONDARY: 5432
-      PGUSER_SECONDARY: testuser2
-      PGPASSWORD_SECONDARY: testpass2
-      PGDATABASE_SECONDARY: testdb2
+      # Secondary database configuration (matching test_helpers.bash)
+      TEST_HOST_SECONDARY: postgres-secondary
+      TEST_PORT_SECONDARY: 5432
+      TEST_USER_SECONDARY: testuser2
+      TEST_PASS_SECONDARY: testpass2
+      TEST_DB_SECONDARY: testdb2
+
+      # Standard PostgreSQL environment variables for compatibility
+      PGPASSWORD: testpass
     volumes:
       - .:/workspace
       - /var/run/docker.sock:/var/run/docker.sock

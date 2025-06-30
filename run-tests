@@ -281,8 +281,8 @@ start_test_environment() {
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
-        if docker-compose -f ../docker-compose.test.yml exec -T postgres-primary pg_isready -U testuser >/dev/null 2>&1 && \
-           docker-compose -f ../docker-compose.test.yml exec -T postgres-secondary pg_isready -U testuser2 >/dev/null 2>&1; then
+        if docker exec db-test-primary pg_isready -U testuser >/dev/null 2>&1 && \
+           docker exec db-test-secondary pg_isready -U testuser2 >/dev/null 2>&1; then
             log_success "Test environment ready"
             return 0
         fi
@@ -310,22 +310,32 @@ run_test_suite() {
     local test_output_file="/tmp/test_${test_name}_output.txt"
     local test_results_file="/tmp/test_${test_name}_results.tap"
 
-    # Build bats command
+    # Build bats command to run inside the container
     local bats_cmd="bats"
-
-    if [[ "$VERBOSE" == "true" ]]; then
-        bats_cmd="$bats_cmd --verbose-run"
-    fi
 
     if [[ "$PARALLEL_JOBS" -gt 1 ]]; then
         bats_cmd="$bats_cmd --jobs $PARALLEL_JOBS"
     fi
 
-    bats_cmd="$bats_cmd --tap"
+    if [[ "$VERBOSE" == "true" ]]; then
+        bats_cmd="$bats_cmd --pretty"  # Use pretty format for verbose output
+    else
+        bats_cmd="$bats_cmd --tap"     # Use TAP format for normal output
+    fi
+
+    # Convert absolute test file path to container path
+    local container_test_file
+    container_test_file=${test_file//$TEST_DIR//workspace/tests}
+
+    # Build docker exec command to run tests inside the test-runner container
+    local docker_exec_cmd="docker exec -i db-test-runner"
+
+    # Full command to execute
+    local full_cmd="$docker_exec_cmd $bats_cmd $container_test_file"
 
     # Run tests with timeout
     local exit_code=0
-    if run_with_timeout "$TIMEOUT" "$bats_cmd" "$test_file" > "$test_results_file" 2> "$test_output_file"; then
+    if run_with_timeout "$TIMEOUT" bash -c "$full_cmd" > "$test_results_file" 2> "$test_output_file"; then
         log_success "Test suite '$test_name' completed successfully"
     else
         exit_code=$?

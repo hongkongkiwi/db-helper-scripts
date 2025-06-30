@@ -6,12 +6,14 @@ FROM ubuntu:22.04
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies and PostgreSQL repository
 RUN apt-get update && apt-get install -y \
     bash \
     git \
     curl \
-    postgresql-client \
+    wget \
+    gnupg \
+    lsb-release \
     docker.io \
     docker-compose \
     python3 \
@@ -27,22 +29,30 @@ RUN apt-get update && apt-get install -y \
     lz4 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install bats helper libraries
-RUN mkdir -p /opt/bats-helpers && \
-    cd /opt/bats-helpers && \
-    git clone https://github.com/bats-core/bats-support.git && \
-    git clone https://github.com/bats-core/bats-assert.git && \
-    git clone https://github.com/bats-core/bats-file.git
+# Install PostgreSQL 15 client tools to match server version
+RUN wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add - && \
+    echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
+    apt-get install -y postgresql-client-15 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /workspace
 
-# Copy scripts and tests
+# Copy scripts and tests first (this includes the existing bats-helpers)
 COPY . .
 
 # Make scripts executable
 RUN chmod +x db-backup-restore db-user-manager db-copy run-tests && \
     find tests/scripts -name "*.bats" -exec chmod +x {} \;
+
+# Ensure bats helper libraries are available where tests expect them
+# The project already includes bats-helpers in tests/bats-helpers/
+# But also create symlinks at the standard location for compatibility
+RUN mkdir -p /opt/bats-helpers && \
+    ln -sf /workspace/tests/bats-helpers/bats-support /opt/bats-helpers/bats-support && \
+    ln -sf /workspace/tests/bats-helpers/bats-assert /opt/bats-helpers/bats-assert && \
+    ln -sf /workspace/tests/bats-helpers/bats-file /opt/bats-helpers/bats-file
 
 # Set environment variables for bats helpers
 ENV BATS_HELPERS_DIR=/opt/bats-helpers
