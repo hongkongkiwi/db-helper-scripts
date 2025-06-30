@@ -7,7 +7,7 @@ A comprehensive test suite for the database helper scripts using bats (Bash Auto
 This test suite provides end-to-end testing for three database helper scripts:
 
 - **`db-backup-restore`** - Backup and restore functionality testing
-- **`db-user-manager`** - User and permission management testing  
+- **`db-user-manager`** - User and permission management testing
 - **`db-copy`** - Database copying and cloning testing
 
 The tests use Docker containers to provide isolated PostgreSQL instances for safe, repeatable testing without affecting any existing databases.
@@ -119,7 +119,7 @@ sudo yum install git
    ```bash
    # Verify bats is installed
    bats --version
-   
+
    # Verify test environment
    docker-compose -f ../docker-compose.test.yml config
    ```
@@ -411,7 +411,7 @@ You can customize the test environment by:
    # Check what's using ports 5432/5433
    lsof -i :5432
    lsof -i :5433
-   
+
    # Stop conflicting services
    sudo systemctl stop postgresql
    ```
@@ -435,7 +435,7 @@ You can customize the test environment by:
    ```bash
    # Clean up Docker
    docker system prune -a
-   
+
    # Clean up test files
    rm -rf tests/tmp/*
    rm -rf /tmp/test_backups/*
@@ -485,7 +485,7 @@ ls -la /tmp/test_backups/
    ```bash
    # Start containers once
    docker-compose -f docker-compose.test.yml up -d
-   
+
    # Run multiple test sessions
    ./run-tests --no-setup --no-teardown
    ```
@@ -518,7 +518,7 @@ Typical execution times (varies by system):
    setup() {
        setup_test_environment
    }
-   
+
    teardown() {
        cleanup_test_databases
    }
@@ -529,10 +529,10 @@ Typical execution times (varies by system):
    @test "description" {
        # Setup
        create_test_database ...
-       
+
        # Execute
        run_script_cmd ...
-       
+
        # Verify
        assert_success
        assert_output --partial "expected"
@@ -569,21 +569,21 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v3
-    
+
     - name: Install PostgreSQL client
       run: sudo apt-get install postgresql-client
-    
+
     - name: Setup test environment
       run: |
         cd tests
         ./setup-tests.sh
-    
+
     - name: Run tests
       run: ./run-tests --parallel 2
-    
+
     - name: Upload test results
       if: always()
       uses: actions/upload-artifact@v3
@@ -600,15 +600,15 @@ test:
   image: ubuntu:latest
   services:
     - docker:dind
-  
+
   before_script:
     - apt-get update -qq
     - apt-get install -y docker.io docker-compose postgresql-client git
     - cd tests && ./setup-tests.sh
-  
+
   script:
     - ./run-tests --parallel 2
-  
+
   artifacts:
     reports:
       junit: tests/reports/junit.xml
@@ -640,7 +640,7 @@ The testing framework has been significantly enhanced to provide comprehensive c
 
 1. **Same Server/Database Prevention (db-copy)**
    - ✅ **CRITICAL**: Prevents copying database to itself
-   - ✅ **Validation**: Clear error messages for invalid operations  
+   - ✅ **Validation**: Clear error messages for invalid operations
    - ✅ **Test Coverage**: Comprehensive edge case testing
 
 2. **Reserved User Prevention (db-user-manager)**
@@ -685,7 +685,7 @@ fi
 
 #### **db-user-manager Security Validation:**
 ```bash
-# Reserved user prevention  
+# Reserved user prevention
 RESERVED_USERS=("postgres" "template0" "template1" "replication" "root" "admin" "public")
 if [[ user_name in RESERVED_USERS ]]; then
     ERROR: "Cannot create user with reserved name"
@@ -720,7 +720,7 @@ if [[ !writable(backup_dir) ]]; then
     ERROR: "Backup directory not writable"
 fi
 
-# Format compatibility checks  
+# Format compatibility checks
 if [[ plain_format && compression != gzip ]]; then
     WARNING: "Plain format only supports gzip"
 fi
@@ -772,7 +772,7 @@ fi
 
 2. **Error Handling Tests** (25+ tests)
    - Connection failures
-   - Permission denials  
+   - Permission denials
    - Invalid configurations
    - Resource constraints
 
@@ -892,7 +892,7 @@ fi
 
 #### **Test Execution Improvements:**
 - ⚡ **40% faster** with parallel execution
-- 🔄 **Smart retry logic** for flaky tests  
+- 🔄 **Smart retry logic** for flaky tests
 - 📊 **Real-time progress** monitoring
 - 🎯 **Focused testing** with pattern matching
 - 💾 **Resource optimization** for Docker containers
@@ -930,7 +930,7 @@ services:
 
 ### **Documentation:**
 - [Advanced Testing Guide](ADVANCED_TESTING.md)
-- [Edge Case Playbook](EDGE_CASES.md)  
+- [Edge Case Playbook](EDGE_CASES.md)
 - [Security Testing Guide](SECURITY_TESTING.md)
 - [Performance Tuning](PERFORMANCE.md)
 
@@ -946,7 +946,7 @@ services:
 With these comprehensive improvements, our database helper scripts now have:
 
 - **🛡️ Bulletproof validation** preventing dangerous operations
-- **🧪 Exhaustive testing** covering 205+ scenarios  
+- **🧪 Exhaustive testing** covering 205+ scenarios
 - **⚡ Performance optimized** execution (4x faster)
 - **🔐 Security hardened** against common vulnerabilities
 - **📊 Enterprise-grade** reporting and monitoring

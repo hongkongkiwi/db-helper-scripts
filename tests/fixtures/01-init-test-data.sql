@@ -77,7 +77,7 @@ FROM public.users
 WHERE is_active = TRUE;
 
 CREATE OR REPLACE VIEW public.order_summary AS
-SELECT 
+SELECT
     o.id as order_id,
     u.username,
     o.order_date,
@@ -128,7 +128,7 @@ INSERT INTO public.orders (user_id, total_amount, status) VALUES
 ON CONFLICT DO NOTHING;
 
 INSERT INTO public.order_items (order_id, product_id, quantity, unit_price)
-SELECT 
+SELECT
     o.id,
     p.id,
     CASE WHEN p.name = 'Test Product 1' THEN 2 ELSE 1 END,
@@ -159,12 +159,12 @@ INSERT INTO public.cache_data (cache_key, cache_value, expires_at) VALUES
 ON CONFLICT DO NOTHING;
 
 -- Create constraints
-ALTER TABLE public.orders 
-ADD CONSTRAINT chk_total_amount_positive 
+ALTER TABLE public.orders
+ADD CONSTRAINT chk_total_amount_positive
 CHECK (total_amount > 0);
 
-ALTER TABLE public.products 
-ADD CONSTRAINT chk_price_positive 
+ALTER TABLE public.products
+ADD CONSTRAINT chk_price_positive
 CHECK (price > 0);
 
 -- Create some additional test users for user management testing
@@ -174,11 +174,11 @@ BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'test_readonly') THEN
         CREATE ROLE test_readonly;
     END IF;
-    
+
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'test_readwrite') THEN
         CREATE ROLE test_readwrite;
     END IF;
-    
+
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'test_admin') THEN
         CREATE ROLE test_admin CREATEDB CREATEROLE;
     END IF;
@@ -220,4 +220,4 @@ CREATE TRIGGER update_users_modified
     FOR EACH ROW
     EXECUTE FUNCTION public.update_modified_time();
 
-COMMIT; 
+COMMIT;

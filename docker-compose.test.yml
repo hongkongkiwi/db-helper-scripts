@@ -54,7 +54,7 @@ services:
       PGUSER_PRIMARY: testuser
       PGPASSWORD_PRIMARY: testpass
       PGDATABASE_PRIMARY: testdb
-      
+
       PGHOST_SECONDARY: postgres-secondary
       PGPORT_SECONDARY: 5432
       PGUSER_SECONDARY: testuser2
@@ -79,4 +79,4 @@ volumes:
 
 networks:
   db-test-network:
-    driver: bridge 
+    driver: bridge

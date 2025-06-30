@@ -1738,11 +1738,11 @@ generate_backup_manifest() {
         "database_version": "$db_version"
     },
     "backup_options": {
-        "include_extensions": $([ "${pg_dump_args[*]}" =~ "--extension" ] && echo "true" || echo "false"),
-        "schema_only": $([ "${pg_dump_args[*]}" =~ "--schema-only" ] && echo "true" || echo "false"),
-        "data_only": $([ "${pg_dump_args[*]}" =~ "--data-only" ] && echo "true" || echo "false"),
-        "no_owner": $([ "${pg_dump_args[*]}" =~ "--no-owner" ] && echo "true" || echo "false"),
-        "no_privileges": $([ "${pg_dump_args[*]}" =~ "--no-privileges" ] && echo "true" || echo "false")
+        "include_extensions": $([[ "${pg_dump_args[*]}" =~ "--extension" ]] && echo "true" || echo "false"),
+        "schema_only": $([[ "${pg_dump_args[*]}" =~ "--schema-only" ]] && echo "true" || echo "false"),
+        "data_only": $([[ "${pg_dump_args[*]}" =~ "--data-only" ]] && echo "true" || echo "false"),
+        "no_owner": $([[ "${pg_dump_args[*]}" =~ "--no-owner" ]] && echo "true" || echo "false"),
+        "no_privileges": $([[ "${pg_dump_args[*]}" =~ "--no-privileges" ]] && echo "true" || echo "false")
     }
 }
 EOF
@@ -2238,7 +2238,7 @@ cmd_backup() {
         exit $EXIT_GENERAL_ERROR
     fi
     local db_name=$(parse_database_url "$DATABASE_URL")
-    
+
     # Critical validation: Prevent backing up system databases unless forced
     local system_databases=("template0" "template1" "postgres")
     for sysdb in "${system_databases[@]}"; do
@@ -2253,20 +2253,20 @@ cmd_backup() {
             fi
         fi
     done
-    
+
     # Validate backup directory permissions
     if [[ ! -w "$backup_dir" ]]; then
         log_error "Backup directory is not writable: $backup_dir"
         log_error "Please check directory permissions or specify a different directory with -D"
         exit $EXIT_GENERAL_ERROR
     fi
-    
+
     # Check for conflicting options
     if [[ "$format" == "plain" && "$compression" != "none" && "$compression" != "gzip" ]]; then
         log_warning "Plain format backup only supports gzip compression, ignoring $compression"
         compression="gzip"
     fi
-    
+
     # Validate parallel options
     if [[ "$PARALLEL_JOBS" -gt 1 && "$format" == "plain" ]]; then
         log_warning "Parallel processing not supported with plain format, using single job"

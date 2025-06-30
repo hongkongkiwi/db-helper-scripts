@@ -7,7 +7,7 @@ A collection of production-ready PostgreSQL database management scripts for back
 This repository contains three powerful bash scripts:
 
 - **`db-backup-restore`** - Backup and restore functionality with compression, filtering, and validation
-- **`db-user-manager`** - User and permission management system  
+- **`db-user-manager`** - User and permission management system
 - **`db-copy`** - Database copying/cloning with schema/data filtering and cross-server support
 
 All scripts include comprehensive error handling, logging, security validation, and support for complex database environments.
@@ -38,6 +38,57 @@ All scripts include comprehensive error handling, logging, security validation, 
    sudo ln -s $PWD/db-user-manager /usr/local/bin/
    sudo ln -s $PWD/db-copy /usr/local/bin/
    ```
+
+## Development Setup
+
+For contributors and developers working on this project:
+
+### Pre-commit Hooks
+
+This project uses pre-commit hooks to ensure code quality:
+
+```bash
+# Install pre-commit (if not already installed)
+pip install pre-commit
+# OR on macOS: brew install pre-commit
+
+# Install the git hook scripts
+pre-commit install
+
+# Run hooks on all files (optional)
+pre-commit run --all-files
+```
+
+The pre-commit configuration includes:
+- **Code formatting**: Trailing whitespace removal, end-of-file fixing
+- **Shell script linting**: Shellcheck analysis for bash scripts
+- **Permission checks**: Ensures scripts are executable
+- **Syntax validation**: YAML and JSON syntax checking
+- **Script validation**: Help commands and README link validation
+
+### Development Workflow
+
+```bash
+# 1. Make your changes
+vim db-backup-restore
+
+# 2. Test your changes
+./run-tests --test "*backup*" --verbose
+
+# 3. Pre-commit hooks will run automatically on commit
+git add -A
+git commit -m "Your changes"  # Pre-commit hooks run here
+
+# 4. If hooks fail, fix issues and try again
+git add -A
+git commit -m "Your changes"
+```
+
+The pre-commit hooks will automatically:
+- Fix formatting issues
+- Check shell script quality
+- Validate script permissions
+- Run basic smoke tests
 
 ## Quick Start
 
@@ -138,7 +189,7 @@ All scripts include comprehensive error handling, logging, security validation, 
 - **Validation**: Schema validation and constraint checking
 - **Monitoring**: Progress tracking, metrics, and webhook notifications
 
-### Database Copy Features  
+### Database Copy Features
 - **Flexible copying**: Schema-only, data-only, or full copy
 - **Cross-server support**: Copy between different PostgreSQL servers
 - **Table filtering**: Include/exclude specific tables or patterns
@@ -241,7 +292,7 @@ For detailed testing documentation, see [tests/README.md](tests/README.md).
 ## Script Versions
 
 - **db-backup-restore**: v2.0.0
-- **db-user-manager**: v1.0.0  
+- **db-user-manager**: v1.0.0
 - **db-copy**: v1.0.0
 
 ## Help

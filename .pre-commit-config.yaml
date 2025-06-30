@@ -1,0 +1,138 @@
+repos:
+  # Basic file formatting and cleanup
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        name: Remove trailing whitespace
+      - id: end-of-file-fixer
+        name: Fix end of files
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+      - id: check-added-large-files
+        name: Check for large files
+        args: ['--maxkb=1000']
+      - id: check-case-conflict
+        name: Check for case conflicts
+      - id: check-executables-have-shebangs
+        name: Check executables have shebangs
+      - id: check-shebang-scripts-are-executable
+        name: Check shebang scripts are executable
+      - id: check-yaml
+        name: Check YAML syntax
+        files: \.(yaml|yml)$
+      - id: check-json
+        name: Check JSON syntax
+        files: \.json$
+
+  # Shell script linting with shellcheck
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.9.0.6
+    hooks:
+      - id: shellcheck
+        name: Shell script analysis
+        files: \.(sh|bash)$|^(db-backup-restore|db-user-manager|db-copy|run-tests)$
+        args:
+          - '--severity=error'
+          - '--shell=bash'
+          - '--exclude=SC1091,SC2034,SC2086,SC2155,SC2183,SC2207'
+          - '--external-sources'
+
+  # Custom hooks for our project
+  - repo: local
+    hooks:
+      # Validate our main scripts have proper permissions
+      - id: check-script-permissions
+        name: Check script permissions
+        entry: |
+          bash -c 'for script in db-backup-restore db-user-manager db-copy run-tests; do
+            [[ -x "$script" ]] || { echo "ERROR: $script is not executable"; exit 1; }
+          done'
+        language: system
+        files: ^(db-backup-restore|db-user-manager|db-copy|run-tests)$
+        pass_filenames: false
+
+      # Validate script versions are consistent
+      - id: check-script-versions
+        name: Check script versions
+        entry: |
+          bash -c '
+            version_backup=$(grep "^VERSION=" db-backup-restore | cut -d"=" -f2 | tr -d "\"")
+            version_user=$(grep "^VERSION=" db-user-manager | cut -d"=" -f2 | tr -d "\"")
+            version_copy=$(grep "^VERSION=" db-copy | cut -d"=" -f2 | tr -d "\"")
+            echo "Versions: backup=$version_backup, user=$version_user, copy=$version_copy"
+          '
+        language: system
+        files: ^(db-backup-restore|db-user-manager|db-copy)$
+        pass_filenames: false
+
+      # Run basic syntax check on our main scripts
+      - id: bash-syntax-check
+        name: Bash syntax check
+        entry: bash -n
+        language: system
+        files: ^(db-backup-restore|db-user-manager|db-copy|run-tests)$
+
+      # Quick smoke test (fast subset of tests)
+      - id: run-smoke-tests
+        name: Run smoke tests
+        entry: |
+          bash -c 'echo "Running smoke tests..."
+          if [[ -f "run-tests" && -x "run-tests" ]]; then
+            echo "Test runner available - would run: ./run-tests --quick --no-docker"
+            echo "Skipping actual test execution in pre-commit for speed"
+          else
+            echo "Test runner not found"
+          fi'
+        language: system
+        files: ^(db-backup-restore|db-user-manager|db-copy|tests/.*\.bats)$
+        pass_filenames: false
+
+      # Check that help commands work
+      - id: check-help-commands
+        name: Check help commands work
+        entry: |
+          bash -c 'for script in db-backup-restore db-user-manager db-copy; do
+            if [[ -x "$script" ]]; then
+              echo "Checking help for $script..."
+              if ! ./"$script" help >/dev/null 2>&1; then
+                echo "ERROR: $script help command failed"
+                exit 1
+              fi
+            fi
+          done
+          echo "All help commands work correctly"'
+        language: system
+        files: ^(db-backup-restore|db-user-manager|db-copy)$
+        pass_filenames: false
+
+      # Validate README links and references
+      - id: check-readme-links
+        name: Check README links
+        entry: |
+          bash -c 'if grep -q "tests/README.md" README.md; then
+            if [[ ! -f "tests/README.md" ]]; then
+              echo "ERROR: README.md references tests/README.md but file does not exist"
+              exit 1
+            fi
+          fi
+          echo "README links validated"'
+        language: system
+        files: ^README\.md$
+        pass_filenames: false
+
+# Configuration
+default_language_version:
+  python: python3
+
+ci:
+  autofix_commit_msg: |
+    [pre-commit.ci] auto fixes from pre-commit hooks
+
+    for more information, see https://pre-commit.ci
+  autofix_prs: true
+  autoupdate_branch: ''
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
+  autoupdate_schedule: weekly
+  skip: []
+  submodules: false

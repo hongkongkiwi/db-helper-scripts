@@ -770,7 +770,7 @@ cmd_create_user() {
         log_error "New username is required. Use --new-user option."
         exit $EXIT_GENERAL_ERROR
     fi
-    
+
     # Critical validation: Prevent creating PostgreSQL reserved users
     local reserved_users=("postgres" "template0" "template1" "replication" "rds_superuser" "rds_replication" "root" "admin" "public")
     for reserved in "${reserved_users[@]}"; do
@@ -780,18 +780,18 @@ cmd_create_user() {
             exit $EXIT_GENERAL_ERROR
         fi
     done
-    
+
     # Validate password strength if provided
     if [[ -n "$new_password" ]]; then
         if [[ ${#new_password} -lt 8 ]]; then
             log_warning "Password is shorter than 8 characters. Consider using a stronger password."
         fi
-        
+
         if [[ "$new_password" =~ ^[a-z]*$ ]] || [[ "$new_password" =~ ^[A-Z]*$ ]] || [[ "$new_password" =~ ^[0-9]*$ ]]; then
             log_warning "Password contains only one character type. Consider using mixed case, numbers, and symbols."
         fi
     fi
-    
+
     # Validate combination of privileges
     if [[ "$superuser" == "true" ]]; then
         log_warning "Granting SUPERUSER privilege. This user will have full administrative access."
@@ -803,7 +803,7 @@ cmd_create_user() {
             fi
         fi
     fi
-    
+
     if [[ "$login" == "false" && "$connection_limit" != "-1" ]]; then
         log_warning "Connection limit specified for non-login user (will be ignored)"
     fi
@@ -977,7 +977,7 @@ cmd_grant_db_access() {
         log_error "Target database is required. Use --target-db option."
         exit $EXIT_GENERAL_ERROR
     fi
-    
+
     # Critical validation: Prevent self-granting permissions
     if [[ "$target_user" == "$DB_USER" ]]; then
         log_warning "You are granting permissions to yourself ($target_user)"
@@ -989,7 +989,7 @@ cmd_grant_db_access() {
             fi
         fi
     fi
-    
+
     # Validate privilege combinations
     if [[ "$privileges" == *"ALL"* ]]; then
         log_warning "Granting ALL privileges on database. This includes administrative access."
@@ -1001,7 +1001,7 @@ cmd_grant_db_access() {
             fi
         fi
     fi
-    
+
     # Check for duplicate database connections
     if [[ "$target_db" == "$DB_NAME" ]]; then
         log_verbose "Granting permissions on the same database we're connected to"

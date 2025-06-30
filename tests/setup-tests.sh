@@ -21,23 +21,23 @@ fi
 install_bats() {
     local bats_dir="/tmp/bats-core"
     local install_dir="/usr/local"
-    
+
     echo "Installing bats-core..."
-    
+
     # Check if bats is already installed
     if command -v bats >/dev/null 2>&1; then
         echo "bats is already installed: $(bats --version)"
         return 0
     fi
-    
+
     # Remove any existing bats installation directory
     rm -rf "$bats_dir"
-    
+
     # Clone bats-core
     git clone https://github.com/bats-core/bats-core.git "$bats_dir"
     cd "$bats_dir"
     git checkout "v$BATS_VERSION"
-    
+
     # Install bats
     if [ "$EUID" -eq 0 ]; then
         ./install.sh "$install_dir"
@@ -45,92 +45,92 @@ install_bats() {
         echo "Installing bats requires sudo privileges..."
         sudo ./install.sh "$install_dir"
     fi
-    
+
     # Clean up
     cd - >/dev/null
     rm -rf "$bats_dir"
-    
+
     echo "bats-core installed successfully"
 }
 
 # Function to install bats helper libraries
 install_bats_helpers() {
     local bats_helpers_dir="$SCRIPT_DIR/bats-helpers"
-    
+
     echo "Installing bats helper libraries..."
-    
+
     mkdir -p "$bats_helpers_dir"
-    
+
     # Install bats-support
     if [ ! -d "$bats_helpers_dir/bats-support" ]; then
         git clone https://github.com/bats-core/bats-support.git "$bats_helpers_dir/bats-support"
     fi
-    
+
     # Install bats-assert
     if [ ! -d "$bats_helpers_dir/bats-assert" ]; then
         git clone https://github.com/bats-core/bats-assert.git "$bats_helpers_dir/bats-assert"
     fi
-    
+
     # Install bats-file
     if [ ! -d "$bats_helpers_dir/bats-file" ]; then
         git clone https://github.com/bats-core/bats-file.git "$bats_helpers_dir/bats-file"
     fi
-    
+
     echo "bats helper libraries installed successfully"
 }
 
 # Function to check Docker installation
 check_docker() {
     echo "Checking Docker installation..."
-    
+
     if ! command -v docker >/dev/null 2>&1; then
         echo "Error: Docker is not installed or not in PATH"
         echo "Please install Docker to run the test environment"
         exit 1
     fi
-    
+
     if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
         echo "Error: Docker Compose is not installed or not in PATH"
         echo "Please install Docker Compose to run the test environment"
         exit 1
     fi
-    
+
     # Check if Docker daemon is running
     if ! docker info >/dev/null 2>&1; then
         echo "Error: Docker daemon is not running"
         echo "Please start Docker daemon before running tests"
         exit 1
     fi
-    
+
     echo "Docker is installed and running"
 }
 
 # Function to check PostgreSQL client tools
 check_pg_tools() {
     echo "Checking PostgreSQL client tools..."
-    
+
     local missing_tools=()
-    
+
     if ! command -v psql >/dev/null 2>&1; then
         missing_tools+=("psql")
     fi
-    
+
     if ! command -v pg_dump >/dev/null 2>&1; then
         missing_tools+=("pg_dump")
     fi
-    
+
     if ! command -v pg_restore >/dev/null 2>&1; then
         missing_tools+=("pg_restore")
     fi
-    
+
     if ! command -v createdb >/dev/null 2>&1; then
         missing_tools+=("createdb")
     fi
-    
+
     if ! command -v dropdb >/dev/null 2>&1; then
         missing_tools+=("dropdb")
     fi
-    
+
     if [ ${#missing_tools[@]} -gt 0 ]; then
         echo "Error: Missing PostgreSQL client tools: ${missing_tools[*]}"
         echo "Please install PostgreSQL client tools:"
@@ -139,62 +139,62 @@ check_pg_tools() {
         echo "  macOS: brew install postgresql"
         exit 1
     fi
-    
+
     echo "PostgreSQL client tools are installed"
 }
 
 # Function to make scripts executable
 make_scripts_executable() {
     echo "Making database helper scripts executable..."
-    
+
     chmod +x "$PROJECT_DIR/db-backup-restore"
     chmod +x "$PROJECT_DIR/db-user-manager"
     chmod +x "$PROJECT_DIR/db-copy"
-    
+
     echo "Scripts are now executable"
 }
 
 # Function to create test directories
 create_test_directories() {
     echo "Creating test directories..."
-    
+
     mkdir -p "$SCRIPT_DIR/tmp"
     mkdir -p "$SCRIPT_DIR/reports"
     mkdir -p "$SCRIPT_DIR/logs"
-    
+
     echo "Test directories created"
 }
 
 # Function to validate test environment
 validate_test_environment() {
     echo "Validating test environment..."
-    
+
     # Check if test fixture exists
     if [ ! -f "$SCRIPT_DIR/fixtures/01-init-test-data.sql" ]; then
         echo "Warning: Test fixtures not found. Tests may fail."
     fi
-    
+
     # Check if helper functions exist
     if [ ! -f "$SCRIPT_DIR/helpers/test_helpers.bash" ]; then
         echo "Error: Test helper functions not found"
         exit 1
     fi
-    
+
     # Check if Docker Compose file exists
     if [ ! -f "$PROJECT_DIR/docker-compose.test.yml" ]; then
         echo "Error: Docker Compose test configuration not found"
         exit 1
     fi
-    
+
     echo "Test environment validation complete"
 }
 
 # Function to create test runner script
 create_test_runner() {
     local runner_script="$PROJECT_DIR/run-tests.sh"
-    
+
     echo "Creating test runner script..."
-    
+
     cat > "$runner_script" << 'EOF'
 #!/bin/bash
 # Test runner script for database helper scripts
@@ -260,11 +260,11 @@ if [ "$RUN_SETUP" = true ]; then
     cd "$SCRIPT_DIR"
     docker-compose -f docker-compose.test.yml down -v || true
     docker-compose -f docker-compose.test.yml up -d
-    
+
     # Wait for services to be ready
     echo "Waiting for PostgreSQL services to be ready..."
     sleep 15
-    
+
     # Verify services are healthy
     if ! docker-compose -f docker-compose.test.yml ps | grep -q "healthy"; then
         echo "Warning: Some services may not be healthy. Checking individual service status..."
@@ -310,23 +310,23 @@ main() {
     echo "============================================"
     echo "Database Helper Scripts Test Setup"
     echo "============================================"
-    
+
     # Check system requirements
     check_docker
     check_pg_tools
-    
+
     # Install testing tools
     install_bats
     install_bats_helpers
-    
+
     # Setup project
     make_scripts_executable
     create_test_directories
     create_test_runner
-    
+
     # Validate environment
     validate_test_environment
-    
+
     echo "============================================"
     echo "Test setup completed successfully!"
     echo "============================================"
@@ -351,4 +351,4 @@ main() {
 }
 
 # Run main function
-main "$@" 
+main "$@"

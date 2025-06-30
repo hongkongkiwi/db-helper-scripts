@@ -140,65 +140,65 @@ parse_arguments() {
 
 check_dependencies() {
     log_info "Checking dependencies..."
-    
+
     local missing_deps=()
-    
+
     # Check for bats
     if ! command -v bats >/dev/null 2>&1; then
         missing_deps+=("bats")
     fi
-    
+
     # Check for Docker
     if ! command -v docker >/dev/null 2>&1; then
         missing_deps+=("docker")
     fi
-    
+
     # Check for Docker Compose
     if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
         missing_deps+=("docker-compose")
     fi
-    
+
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
         log_error "Missing dependencies: ${missing_deps[*]}"
         log_error "Please run tests/setup-tests.sh to install dependencies"
         exit 1
     fi
-    
+
     log_success "All dependencies available"
 }
 
 start_test_environment() {
     log_info "Starting test environment..."
-    
+
     cd "$TEST_DIR"
-    
+
     # Stop any existing containers
     if docker-compose -f ../docker-compose.test.yml ps -q | grep -q .; then
         log_info "Stopping existing test containers..."
         docker-compose -f ../docker-compose.test.yml down --volumes
     fi
-    
+
     # Start fresh containers
     log_info "Starting fresh test containers..."
     timeout 120 docker-compose -f ../docker-compose.test.yml up -d --force-recreate
-    
+
     # Wait for containers to be ready
     log_info "Waiting for containers to be ready..."
     local max_attempts=30
     local attempt=1
-    
+
     while [ $attempt -le $max_attempts ]; do
         if docker-compose -f ../docker-compose.test.yml exec -T db-primary pg_isready -U testuser >/dev/null 2>&1 && \
            docker-compose -f ../docker-compose.test.yml exec -T db-secondary pg_isready -U testuser2 >/dev/null 2>&1; then
             log_success "Test environment ready"
             return 0
         fi
-        
+
         log_info "Waiting for databases... (attempt $attempt/$max_attempts)"
         sleep 5
         ((attempt++))
     done
-    
+
     log_error "Test environment failed to start within timeout"
     return 1
 }
@@ -206,26 +206,26 @@ start_test_environment() {
 run_test_suite() {
     local test_file="$1"
     local test_name=$(basename "$test_file" .bats)
-    
+
     log_info "Running test suite: $test_name"
-    
+
     local start_time=$(date +%s)
     local test_output_file="/tmp/test_${test_name}_output.txt"
     local test_results_file="/tmp/test_${test_name}_results.tap"
-    
+
     # Build bats command
     local bats_cmd="bats"
-    
+
     if [[ "$VERBOSE" == "true" ]]; then
         bats_cmd="$bats_cmd --verbose-run"
     fi
-    
+
     if [[ "$PARALLEL_JOBS" -gt 1 ]]; then
         bats_cmd="$bats_cmd --jobs $PARALLEL_JOBS"
     fi
-    
+
     bats_cmd="$bats_cmd --tap"
-    
+
     # Run tests with timeout
     local exit_code=0
     if timeout "$TIMEOUT" $bats_cmd "$test_file" > "$test_results_file" 2> "$test_output_file"; then
@@ -238,29 +238,29 @@ run_test_suite() {
             log_error "Test suite '$test_name' failed with exit code $exit_code"
         fi
     fi
-    
+
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
-    
+
     # Parse test results
     local suite_total=0
     local suite_passed=0
     local suite_failed=0
     local suite_skipped=0
-    
+
     if [[ -f "$test_results_file" ]]; then
         suite_total=$(grep -c "^ok\|^not ok" "$test_results_file" || true)
         suite_passed=$(grep -c "^ok" "$test_results_file" || true)
         suite_failed=$(grep -c "^not ok" "$test_results_file" || true)
         suite_skipped=$(grep -c "# SKIP" "$test_results_file" || true)
     fi
-    
+
     # Update global counters
     TOTAL_TESTS=$((TOTAL_TESTS + suite_total))
     PASSED_TESTS=$((PASSED_TESTS + suite_passed))
     FAILED_TESTS=$((FAILED_TESTS + suite_failed))
     SKIPPED_TESTS=$((SKIPPED_TESTS + suite_skipped))
-    
+
     # Collect failed test names
     if [[ -f "$test_results_file" && $suite_failed -gt 0 ]]; then
         while IFS= read -r line; do
@@ -270,17 +270,17 @@ run_test_suite() {
             fi
         done < "$test_results_file"
     fi
-    
+
     # Report suite results
     log_info "Suite '$test_name' results: $suite_passed passed, $suite_failed failed, $suite_skipped skipped (${duration}s)"
-    
+
     # Show errors if verbose
     if [[ "$VERBOSE" == "true" && -f "$test_output_file" && -s "$test_output_file" ]]; then
         echo "Test output for $test_name:"
         cat "$test_output_file"
         echo "---"
     fi
-    
+
     return $exit_code
 }
 
@@ -288,11 +288,11 @@ generate_coverage_report() {
     if [[ "$COVERAGE_REPORT" != "true" ]]; then
         return 0
     fi
-    
+
     log_info "Generating coverage report..."
-    
+
     local coverage_file="/tmp/test_coverage_report.txt"
-    
+
     cat > "$coverage_file" << EOF
 # Test Coverage Report
 Generated: $(date)
@@ -308,12 +308,12 @@ Generated: $(date)
 
 ### db-backup-restore Features:
 EOF
-    
+
     # Analyze test files for feature coverage
     local backup_tests=$(find "$TEST_DIR" -name "*backup*" -type f | wc -l)
     local copy_tests=$(find "$TEST_DIR" -name "*copy*" -type f | wc -l)
     local user_tests=$(find "$TEST_DIR" -name "*user*" -type f | wc -l)
-    
+
     cat >> "$coverage_file" << EOF
 - Backup Tests: $backup_tests test files
 - Copy Tests: $copy_tests test files
@@ -331,9 +331,9 @@ EOF
 - Bulk operations: ✓
 
 EOF
-    
+
     log_success "Coverage report generated: $coverage_file"
-    
+
     if [[ "$OUTPUT_FORMAT" == "json" ]]; then
         generate_json_report > "/tmp/test_coverage.json"
     fi
@@ -362,19 +362,19 @@ generate_performance_report() {
     if [[ "$PERFORMANCE_REPORT" != "true" ]]; then
         return 0
     fi
-    
+
     log_info "Generating performance report..."
-    
+
     # Extract performance metrics from test output
     local perf_file="/tmp/test_performance_report.txt"
-    
+
     cat > "$perf_file" << EOF
 # Performance Test Report
 Generated: $(date)
 
 ## Test Execution Times
 EOF
-    
+
     # Add performance metrics if available
     log_success "Performance report generated: $perf_file"
 }
@@ -384,17 +384,17 @@ cleanup_test_environment() {
         log_info "Skipping cleanup (--no-cleanup specified)"
         return 0
     fi
-    
+
     log_info "Cleaning up test environment..."
-    
+
     cd "$TEST_DIR"
-    
+
     # Stop and remove containers
     docker-compose -f ../docker-compose.test.yml down --volumes --remove-orphans
-    
+
     # Clean up temporary files
     rm -f /tmp/test_*_output.txt /tmp/test_*_results.tap
-    
+
     log_success "Cleanup completed"
 }
 
@@ -402,19 +402,19 @@ retry_failed_tests() {
     if [[ "$RETRY_FAILED" != "true" || ${#FAILED_TEST_NAMES[@]} -eq 0 ]]; then
         return 0
     fi
-    
+
     log_info "Retrying failed tests..."
-    
+
     # Reset counters for retry
     local original_failed=$FAILED_TESTS
     FAILED_TESTS=0
     PASSED_TESTS=0
-    
+
     # Run each failed test individually
     for failed_test in "${FAILED_TEST_NAMES[@]}"; do
         local test_suite=$(echo "$failed_test" | cut -d: -f1)
         local test_file="$TEST_DIR/scripts/test_${test_suite}.bats"
-        
+
         if [[ -f "$test_file" ]]; then
             log_info "Retrying: $failed_test"
             if run_test_suite "$test_file"; then
@@ -424,24 +424,24 @@ retry_failed_tests() {
             fi
         fi
     done
-    
+
     log_info "Retry completed: $((original_failed - FAILED_TESTS)) tests now passing"
 }
 
 main() {
     TEST_START_TIME=$(date)
-    
+
     log_info "Database Helper Scripts Test Runner"
     log_info "Starting comprehensive test execution..."
-    
+
     parse_arguments "$@"
     check_dependencies
-    
+
     if ! start_test_environment; then
         log_error "Failed to start test environment"
         exit 1
     fi
-    
+
     # Find test files
     local test_files=()
     if [[ -n "$SPECIFIC_TEST" ]]; then
@@ -449,15 +449,15 @@ main() {
     else
         mapfile -t test_files < <(find "$TEST_DIR/scripts" -name "test_*.bats" -type f | sort)
     fi
-    
+
     if [[ ${#test_files[@]} -eq 0 ]]; then
         log_error "No test files found"
         cleanup_test_environment
         exit 1
     fi
-    
+
     log_info "Found ${#test_files[@]} test suite(s)"
-    
+
     # Run test suites
     local overall_exit_code=0
     for test_file in "${test_files[@]}"; do
@@ -465,17 +465,17 @@ main() {
             overall_exit_code=1
         fi
     done
-    
+
     # Retry failed tests if requested
     retry_failed_tests
-    
+
     # Generate reports
     generate_coverage_report
     generate_performance_report
-    
+
     # Final summary
     local total_duration=$(($(date +%s) - $(date -d "$TEST_START_TIME" +%s)))
-    
+
     echo
     log_info "=== FINAL TEST SUMMARY ==="
     log_info "Total Tests: $TOTAL_TESTS"
@@ -488,7 +488,7 @@ main() {
     log_warning "Skipped: $SKIPPED_TESTS"
     log_info "Duration: ${total_duration}s"
     log_info "Success Rate: $(( TOTAL_TESTS > 0 ? PASSED_TESTS * 100 / TOTAL_TESTS : 0 ))%"
-    
+
     if [[ ${#FAILED_TEST_NAMES[@]} -gt 0 ]]; then
         echo
         log_error "Failed tests:"
@@ -496,9 +496,9 @@ main() {
             log_error "  - $failed_test"
         done
     fi
-    
+
     cleanup_test_environment
-    
+
     if [[ $overall_exit_code -eq 0 && $FAILED_TESTS -eq 0 ]]; then
         log_success "All tests passed!"
         exit 0
@@ -511,4 +511,4 @@ main() {
 # Handle script interruption
 trap 'log_warning "Test execution interrupted"; cleanup_test_environment; exit 130' INT TERM
 
-main "$@" 
+main "$@"
