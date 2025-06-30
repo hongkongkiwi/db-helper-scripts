@@ -154,9 +154,31 @@ run_with_timeout() {
 # Input validation and security functions
 sanitize_for_log() {
     local input="$1"
+    local preserve_username="${2:-false}"
+
+
+
     # Remove passwords and sensitive data from log output
-    echo "$input" | sed -E 's/(password|passwd|pass)[[:space:]]*[:=][[:space:]]*[^[:space:]&]+/\1=***REDACTED***/gi' | \
-                    sed -E 's/postgresql:\/\/[^:]*:[^@]*@/postgresql:\/\/user:***@/g'
+    local sanitized
+    sanitized=$(echo "$input" | sed -E 's/(password|passwd|pass)[[:space:]]*[:=][[:space:]]*[^[:space:]&]+/\1=***REDACTED***/gi')
+
+    # In verbose mode, preserve username for debugging but still hide password
+    if [[ "$VERBOSE" == "true" && "$preserve_username" == "true" ]]; then
+
+        # First handle strings WITH passwords (contains colon after username)
+        sanitized=$(echo "$sanitized" | sed -E 's/postgresql:\/\/([^:]*):([^@]*)@/postgresql:\/\/\1:***@/g')
+        # Strings without passwords are left unchanged
+    else
+
+        # Default: hide username too for security
+        # First handle strings WITH passwords
+        sanitized=$(echo "$sanitized" | sed -E 's/postgresql:\/\/[^:]*:[^@]*@/postgresql:\/\/user:***@/g')
+        # Then handle strings WITHOUT passwords (but not those already processed with :***)
+        sanitized=$(echo "$sanitized" | sed -E 's/postgresql:\/\/[^:@]+@/postgresql:\/\/user@/g')
+    fi
+
+
+    echo "$sanitized"
 }
 
 sanitize_string() {
@@ -229,7 +251,7 @@ log_error() {
 log_verbose() {
     local message="$1"
     local safe_message
-    safe_message=$(sanitize_for_log "$message")
+    safe_message=$(sanitize_for_log "$message" true)
     if [[ "$VERBOSE" == "true" && "$QUIET" != "true" ]]; then
         echo -e "${BLUE}[VERBOSE]${NC} $safe_message" >&2
     fi
@@ -349,7 +371,7 @@ test_connection() {
     log_verbose "Testing connection to $db_label database"
 
     if ! execute_pg_command psql "$connection_string" -c "SELECT 1;" &>/dev/null; then
-        log_error "Cannot connect to $db_label database: $(sanitize_for_log "$connection_string")"
+        log_error "Cannot connect to $db_label database: $(sanitize_for_log "$connection_string" true)"
         return $EXIT_CONNECTION_ERROR
     fi
 
@@ -363,7 +385,8 @@ check_database_exists() {
 
     # Connect to default database to check if target exists
     local base_conn
-    base_conn="${connection_string%/*}/postgres"
+    local admin_db="${ADMIN_DB:-postgres}"
+    base_conn="${connection_string%/*}/$admin_db"
 
     local exists
     exists=$(execute_pg_command psql "$base_conn" -t -c "SELECT 1 FROM pg_database WHERE datname='$dbname';" 2>/dev/null | xargs)
@@ -433,7 +456,8 @@ copy_using_template() {
 
     # Connect to default database to create target with template
     local base_conn
-    base_conn="${target_conn%/*}/postgres"
+    local admin_db="${ADMIN_DB:-postgres}"
+    base_conn="${target_conn%/*}/$admin_db"
 
     # Get source database encoding and collation for compatibility
     local src_encoding
@@ -494,7 +518,7 @@ sync_database() {
     TEMP_FILES+=("$temp_file")
 
     # Build sync-optimized dump options
-    local dump_options=("--no-owner" "--no-privileges" "--clean" "--if-exists")
+    local dump_options=("--no-owner" "--no-privileges" "--clean" "--if-exists" "--serializable-deferrable")
 
     if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then
         dump_options+=("--extension=*")
@@ -505,7 +529,9 @@ sync_database() {
     fi
 
     # Add table filtering options
-    add_table_filters dump_options
+    while IFS= read -r filter_opt; do
+        [[ -n "$filter_opt" ]] && dump_options+=("$filter_opt")
+    done < <(add_table_filters)
 
     # Performance optimizations for sync
     if [[ "$DISABLE_TRIGGERS" == "true" ]]; then
@@ -521,7 +547,7 @@ sync_database() {
     fi
 
     log_verbose "Applying changes to target database"
-    if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
+    if ! execute_pg_command psql "$target_conn" -f "$temp_file"; then
         log_error "Failed to sync database"
         exit "$EXIT_COPY_ERROR"
     fi
@@ -571,8 +597,8 @@ copy_database() {
     local target_conn="$2"
 
     log_info "Starting database copy operation"
-    log_verbose "Source: $(sanitize_for_log "$src_conn")"
-    log_verbose "Target: $(sanitize_for_log "$target_conn")"
+    log_verbose "Source: $(sanitize_for_log "$src_conn" true)"
+    log_verbose "Target: $(sanitize_for_log "$target_conn" true)"
 
     # Test connections
     test_connection "$src_conn" "source" || exit "$EXIT_CONNECTION_ERROR"
@@ -713,7 +739,8 @@ create_target_database() {
 
     # Connect to default database to create target
     local base_conn
-    base_conn="${target_conn%/*}/postgres"
+    local admin_db="${ADMIN_DB:-postgres}"
+    base_conn="${target_conn%/*}/$admin_db"
 
     if ! execute_pg_command psql "$base_conn" -c "CREATE DATABASE \"$TARGET_DB_NAME\";" 2>/dev/null; then
         log_error "Failed to create target database: $TARGET_DB_NAME"
@@ -730,7 +757,8 @@ drop_target_database() {
 
     # Connect to default database to drop target
     local base_conn
-    base_conn="${target_conn%/*}/postgres"
+    local admin_db="${ADMIN_DB:-postgres}"
+    base_conn="${target_conn%/*}/$admin_db"
 
     # Terminate connections to target database
     execute_pg_command psql "$base_conn" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$TARGET_DB_NAME';" &>/dev/null || true
@@ -754,14 +782,16 @@ copy_schema_only() {
     TEMP_FILES+=("$temp_file")
 
     # Build pg_dump options
-    local dump_options=("--schema-only" "--no-owner" "--no-privileges")
+    local dump_options=("--schema-only" "--no-owner" "--no-privileges" "--serializable-deferrable")
 
     if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then
         dump_options+=("--extension=*")
     fi
 
     # Add table filtering options
-    add_table_filters dump_options
+    while IFS= read -r filter_opt; do
+        [[ -n "$filter_opt" ]] && dump_options+=("$filter_opt")
+    done < <(add_table_filters)
 
     # Dump schema
     log_verbose "Dumping schema from source database"
@@ -791,14 +821,16 @@ copy_data_only() {
     TEMP_FILES+=("$temp_file")
 
     # Build pg_dump options
-    local dump_options=("--data-only" "--no-owner" "--no-privileges")
+    local dump_options=("--data-only" "--no-owner" "--no-privileges" "--serializable-deferrable")
 
     if [[ "$EXCLUDE_LARGE_OBJECTS" == "true" ]]; then
         dump_options+=("--no-blobs")
     fi
 
     # Add table filtering options
-    add_table_filters dump_options
+    while IFS= read -r filter_opt; do
+        [[ -n "$filter_opt" ]] && dump_options+=("$filter_opt")
+    done < <(add_table_filters)
 
     # Dump data
     log_verbose "Dumping data from source database"
@@ -828,7 +860,7 @@ copy_full_database() {
     TEMP_FILES+=("$temp_file")
 
     # Build pg_dump options
-    local dump_options=("--no-owner" "--no-privileges" "--clean")
+    local dump_options=("--no-owner" "--no-privileges" "--clean" "--serializable-deferrable")
 
     if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then
         dump_options+=("--extension=*")
@@ -850,7 +882,9 @@ copy_full_database() {
     fi
 
     # Add table filtering options
-    add_table_filters dump_options
+    while IFS= read -r filter_opt; do
+        [[ -n "$filter_opt" ]] && dump_options+=("$filter_opt")
+    done < <(add_table_filters)
 
     # Dump database
     log_verbose "Dumping database from source"
@@ -880,27 +914,40 @@ copy_full_database() {
 }
 
 add_table_filters() {
-    local -n options_ref=$1
+    local -a filter_options=()
 
     # Add include tables
-    for table in "${INCLUDE_TABLES[@]}"; do
-        options_ref+=("--table=$table")
-    done
+    if [[ ${#INCLUDE_TABLES[@]} -gt 0 ]]; then
+        for table in "${INCLUDE_TABLES[@]}"; do
+            filter_options+=("--table=$table")
+        done
+    fi
 
     # Add exclude tables
-    for table in "${EXCLUDE_TABLES[@]}"; do
-        options_ref+=("--exclude-table=$table")
-    done
+    if [[ ${#EXCLUDE_TABLES[@]} -gt 0 ]]; then
+        for table in "${EXCLUDE_TABLES[@]}"; do
+            filter_options+=("--exclude-table=$table")
+        done
+    fi
 
     # Add include schemas
-    for schema in "${INCLUDE_SCHEMAS[@]}"; do
-        options_ref+=("--schema=$schema")
-    done
+    if [[ ${#INCLUDE_SCHEMAS[@]} -gt 0 ]]; then
+        for schema in "${INCLUDE_SCHEMAS[@]}"; do
+            filter_options+=("--schema=$schema")
+        done
+    fi
 
     # Add exclude schemas
-    for schema in "${EXCLUDE_SCHEMAS[@]}"; do
-        options_ref+=("--exclude-schema=$schema")
-    done
+    if [[ ${#EXCLUDE_SCHEMAS[@]} -gt 0 ]]; then
+        for schema in "${EXCLUDE_SCHEMAS[@]}"; do
+            filter_options+=("--exclude-schema=$schema")
+        done
+    fi
+
+    # Return the options as space-separated string (only if we have any)
+    if [[ ${#filter_options[@]} -gt 0 ]]; then
+        printf '%s\n' "${filter_options[@]}"
+    fi
 }
 
 validate_copy_result() {
@@ -1021,6 +1068,37 @@ validate_copy_result() {
 
 # Command functions
 cmd_copy() {
+    # First pass: extract global options that can appear anywhere
+    local filtered_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --force)
+                FORCE=true
+                shift
+                ;;
+            *)
+                filtered_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Rebuild argument array without global options
+    set -- "${filtered_args[@]}"
+
+    # Second pass: process copy-specific options
     while [[ $# -gt 0 ]]; do
         case $1 in
             # Source database options
@@ -1093,17 +1171,76 @@ cmd_copy() {
                 ;;
             --password)
                 if [[ -t 0 ]]; then
-                    # Add timeout to prevent hangs in test environments
-                    if read -r -s -p "Enter password: " -t 10 password 2>/dev/null; then
-                        echo
-                        SRC_DB_PASSWORD="$password"
-                        TARGET_DB_PASSWORD="$password"
+                    # Check if source and target users are different
+                    if [[ -n "$SRC_DB_USER" && -n "$TARGET_DB_USER" && "$SRC_DB_USER" != "$TARGET_DB_USER" ]]; then
+                        log_info "Different users detected. Prompting for passwords separately."
+
+                        # Prompt for source password
+                        if read -r -s -p "Enter password for source user '$SRC_DB_USER': " src_password 2>/dev/null; then
+                            echo
+                            if [[ -n "$src_password" ]]; then
+                                SRC_DB_PASSWORD="$src_password"
+                                log_verbose "Source password set"
+                            else
+                                log_warning "Empty source password provided"
+                            fi
+                        else
+                            echo
+                            log_warning "No source password provided"
+                        fi
+
+                        # Prompt for target password
+                        if read -r -s -p "Enter password for target user '$TARGET_DB_USER': " target_password 2>/dev/null; then
+                            echo
+                            if [[ -n "$target_password" ]]; then
+                                TARGET_DB_PASSWORD="$target_password"
+                                log_verbose "Target password set"
+                            else
+                                log_warning "Empty target password provided"
+                            fi
+                        else
+                            echo
+                            log_warning "No target password provided"
+                        fi
                     else
-                        echo
-                        log_warning "No password provided within 10 seconds, skipping password input"
+                        # Same user or users not yet specified - use single password for both
+                        local prompt_text="Enter password"
+                        if [[ -n "$SRC_DB_USER" ]]; then
+                            prompt_text="Enter password for user '$SRC_DB_USER'"
+                        elif [[ -n "$TARGET_DB_USER" ]]; then
+                            prompt_text="Enter password for user '$TARGET_DB_USER'"
+                        else
+                            prompt_text="Enter database password"
+                        fi
+                        if read -r -s -p "$prompt_text: " password 2>/dev/null; then
+                            echo
+                            if [[ -n "$password" ]]; then
+                                SRC_DB_PASSWORD="$password"
+                                TARGET_DB_PASSWORD="$password"
+                                log_verbose "Password set for both source and target connections"
+                            else
+                                log_warning "Empty password provided"
+                            fi
+                        else
+                            echo
+                            log_warning "No password provided"
+                        fi
+                    fi
+
+                    if [[ -z "$SRC_DB_PASSWORD" || -z "$TARGET_DB_PASSWORD" ]]; then
+                        log_info "Tip: Use --src-password and --target-password for non-interactive environments"
+                        log_info "Or set PGPASSWORD environment variable"
                     fi
                 else
-                    log_verbose "Non-interactive environment, skipping password prompt"
+                    log_verbose "Non-interactive environment, checking PGPASSWORD..."
+                    if [[ -n "$PGPASSWORD" ]]; then
+                        SRC_DB_PASSWORD="$PGPASSWORD"
+                        TARGET_DB_PASSWORD="$PGPASSWORD"
+                        log_verbose "Using PGPASSWORD environment variable"
+                    else
+                        log_warning "No password available in non-interactive environment"
+                        log_info "Set PGPASSWORD environment variable or use --src-password/--target-password"
+                    fi
                 fi
                 shift
                 ;;
@@ -1199,7 +1336,7 @@ cmd_copy() {
                 ;;
             --connection-timeout)
                 CONNECTION_TIMEOUT="$2"
-                validate_numeric "$CONNECTION_TIMEOUT" "connection timeout" 1 3600
+                validate_numeric "$CONNECTION_TIMEOUT" "connection timeout" 0 3600
                 shift 2
                 ;;
             # SSL options
@@ -1219,6 +1356,11 @@ cmd_copy() {
                 SSL_CA="$2"
                 shift 2
                 ;;
+            # Administrative database options
+            --admin-db)
+                ADMIN_DB="$2"
+                shift 2
+                ;;
             # Progress and logging
             --progress)
                 SHOW_PROGRESS=true
@@ -1234,6 +1376,23 @@ cmd_copy() {
                 LOG_FILE="$2"
                 log_verbose "Log file specified (future feature): $LOG_FILE"
                 shift 2
+                ;;
+            # Global options (allow them to be placed anywhere)
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --force)
+                FORCE=true
+                shift
                 ;;
             -h|--help)
                 show_copy_help
@@ -1363,6 +1522,15 @@ cmd_copy() {
     local target_conn
     target_conn=$(build_connection_string "$TARGET_DB_HOST" "$TARGET_DB_PORT" "$TARGET_DB_USER" "$TARGET_DB_NAME" "$TARGET_DB_PASSWORD")
 
+    # Show connection details in verbose mode
+    if [[ "$VERBOSE" == "true" ]]; then
+        log_verbose "Source connection: $(sanitize_for_log "$src_conn" true)"
+        log_verbose "Target connection: $(sanitize_for_log "$target_conn" true)"
+        log_verbose "Source host: $SRC_DB_HOST, port: $SRC_DB_PORT, user: $SRC_DB_USER, database: $SRC_DB_NAME"
+        log_verbose "Target host: $TARGET_DB_HOST, port: $TARGET_DB_PORT, user: $TARGET_DB_USER, database: $TARGET_DB_NAME"
+        log_verbose "SSL mode: ${SSL_MODE:-not set}"
+    fi
+
     # Perform the copy
     copy_database "$src_conn" "$target_conn"
 }
@@ -1448,7 +1616,7 @@ LEGACY UNIFIED OPTIONS (for same-server copies):
     -p, --port <port>        Database port (applies to both source and target)
     -U, --username <user>    Database username (applies to both source and target)
     -d, --dbname <name>      Source database name
-    --password               Prompt for password (applies to both source and target)
+    --password               Prompt for password (prompts separately if users differ)
 
 COPY OPTIONS:
     --schema-only            Copy schema only (no data)
@@ -1480,13 +1648,17 @@ TABLE FILTERING OPTIONS:
 SAFETY AND VALIDATION OPTIONS:
     --skip-confirmation      Skip confirmation prompts
     --validate               Validate copy result
-    --connection-timeout <s> Connection timeout in seconds (default: 30)
+    --connection-timeout <s> Connection timeout in seconds (0=no timeout, default: 30)
 
 SSL OPTIONS:
     --sslmode <mode>         SSL mode (require, prefer, disable)
     --sslcert <file>         SSL certificate file
     --sslkey <file>          SSL key file
     --sslrootcert <file>     SSL root certificate file
+
+ADMINISTRATIVE OPTIONS:
+    --admin-db <dbname>      Administrative database name (default: postgres)
+                             Use 'defaultdb' for DigitalOcean managed databases
 
 PROGRESS AND LOGGING OPTIONS:
     --progress               Show progress updates
