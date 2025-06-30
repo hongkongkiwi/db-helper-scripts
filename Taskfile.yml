@@ -148,8 +148,13 @@ tasks:
     desc: Check if ready for release (linting only - tests skipped for speed)
     cmds:
       - task: dev:lint
-      - git status --porcelain | grep -q . && echo "Working directory not clean" && exit 1 || \
+      - |
+        if git status --porcelain | grep -q .; then
+          echo "Working directory not clean"
+          exit 1
+        else
           echo "Working directory clean"
+        fi
 
   release:version:
     desc: Show current versions in scripts
