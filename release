@@ -48,12 +48,15 @@ show_help() {
 Database Helper Scripts Release Tool
 
 USAGE:
-    $0 <version> [options]
+    $0 <version|type> [options]
     $0 --current          # Show current version
     $0 --help            # Show this help
 
 ARGUMENTS:
     <version>            New version number (e.g., 2.1.0, 1.5.2)
+    patch               Increment patch version (e.g., 2.0.1 → 2.0.2)
+    minor               Increment minor version (e.g., 2.0.1 → 2.1.0)
+    major               Increment major version (e.g., 2.0.1 → 3.0.0)
 
 OPTIONS:
     --dry-run           Show what would be done without making changes
@@ -62,11 +65,17 @@ OPTIONS:
     -h, --help          Show this help message
 
 EXAMPLES:
-    # Release version 2.1.0
+    # Automatic patch release (recommended)
+    $0 patch
+
+    # Automatic minor release
+    $0 minor
+
+    # Manual version
     $0 2.1.0
 
     # Preview what a release would do
-    $0 2.1.0 --dry-run
+    $0 patch --dry-run
 
     # Show current version
     $0 --current
@@ -81,6 +90,91 @@ get_current_version() {
         # Fallback: get version from first script
         grep 'SCRIPT_VERSION=' "$SCRIPT_DIR/db-backup-restore" | head -1 | sed 's/.*"\(.*\)".*/\1/'
     fi
+}
+
+get_latest_git_version() {
+    # Get the latest version tag from git (both local and remote)
+    local latest_tag
+    latest_tag=$(git tag --list --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+
+    if [[ -n "$latest_tag" ]]; then
+        # Remove the 'v' prefix
+        echo "${latest_tag#v}"
+    else
+        # No version tags found, start from 0.0.0
+        echo "0.0.0"
+    fi
+}
+
+get_effective_current_version() {
+    # Get the higher of: latest git tag or VERSION file/script version
+    local git_version
+    git_version=$(get_latest_git_version)
+    local file_version
+    file_version=$(get_current_version)
+
+    # Compare versions and return the higher one
+    if version_greater_than "$git_version" "$file_version"; then
+        echo "$git_version"
+    else
+        echo "$file_version"
+    fi
+}
+
+version_greater_than() {
+    local version1="$1"
+    local version2="$2"
+
+    # Split versions into components
+    local v1_major v1_minor v1_patch
+    IFS='.' read -r v1_major v1_minor v1_patch <<< "$version1"
+
+    local v2_major v2_minor v2_patch
+    IFS='.' read -r v2_major v2_minor v2_patch <<< "$version2"
+
+    # Compare major.minor.patch
+    if [[ $v1_major -gt $v2_major ]]; then
+        return 0
+    elif [[ $v1_major -eq $v2_major ]]; then
+        if [[ $v1_minor -gt $v2_minor ]]; then
+            return 0
+        elif [[ $v1_minor -eq $v2_minor ]]; then
+            if [[ $v1_patch -gt $v2_patch ]]; then
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+increment_version() {
+    local version="$1"
+    local type="$2"  # patch, minor, or major
+
+    # Split version into components
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$version"
+
+    case "$type" in
+        patch)
+            echo "$major.$minor.$((patch + 1))"
+            ;;
+        minor)
+            echo "$major.$((minor + 1)).0"
+            ;;
+        major)
+            echo "$((major + 1)).0.0"
+            ;;
+        *)
+            log_error "Invalid increment type: $type"
+            exit 1
+            ;;
+    esac
+}
+
+check_tag_exists() {
+    local tag="$1"
+    git tag --list | grep -q "^${tag}$"
 }
 
 validate_version() {
@@ -312,9 +406,21 @@ main() {
                 ;;
             *)
                 if [[ -z "$NEW_VERSION" ]]; then
-                    NEW_VERSION="$1"
+                    case "$1" in
+                        patch|minor|major)
+                            # Auto-increment version
+                            local current_version
+                            current_version=$(get_effective_current_version)
+                            NEW_VERSION=$(increment_version "$current_version" "$1")
+                            log_info "Auto-incrementing $1 version: $current_version → $NEW_VERSION"
+                            ;;
+                        *)
+                            # Manual version number
+                            NEW_VERSION="$1"
+                            ;;
+                    esac
                 else
-                    log_error "Multiple version numbers provided"
+                    log_error "Multiple version arguments provided"
                     exit 1
                 fi
                 shift
@@ -323,7 +429,7 @@ main() {
     done
 
     if [[ -z "$NEW_VERSION" ]]; then
-        log_error "Version number required"
+        log_error "Version number or increment type required"
         show_help
         exit 1
     fi
@@ -331,9 +437,23 @@ main() {
     # Validate inputs
     validate_version "$NEW_VERSION"
 
+    # Check if tag already exists
+    local tag_name="v$NEW_VERSION"
+    if check_tag_exists "$tag_name"; then
+        log_error "Tag $tag_name already exists"
+        if [[ "$FORCE" != "true" ]]; then
+            log_error "Use --force to override or choose a different version"
+            log_info "Current git tags:"
+            git tag --list --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -5
+            exit 1
+        else
+            log_warning "Tag $tag_name already exists, but --force specified"
+        fi
+    fi
+
     # Show current version
     local current_version
-    current_version=$(get_current_version)
+    current_version=$(get_effective_current_version)
     log_info "Current version: $current_version"
     log_info "New version: $NEW_VERSION"
 
