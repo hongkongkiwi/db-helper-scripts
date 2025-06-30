@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 LABEL maintainer="hongkongkiwi"
 LABEL description="Database helper scripts for PostgreSQL backup, restore, copy, and user management"
