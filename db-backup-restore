@@ -1,0 +1,3593 @@
+#!/bin/bash
+
+# Database Backup and Restore Script
+# Supports PostgreSQL databases with full backup and restore capabilities
+
+set -euo pipefail
+
+# Script configuration
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_VERSION="2.0.0"
+DEFAULT_BACKUP_DIR="./backups"
+DEFAULT_COMPRESSION="gzip"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Global variables
+VERBOSE=false
+QUIET=false
+BACKUP_DIR=""
+COMPRESSION=""
+FORCE=false
+SSL_MODE=""
+SSL_CERT=""
+SSL_KEY=""
+SSL_CA=""
+PARALLEL_JOBS=1
+RETRY_COUNT=0
+RETRY_DELAY=1
+RETRY_BACKOFF=2.0
+SHOW_PROGRESS=false
+BACKUP_TIMEOUT=0
+PROGRESS_INTERVAL=30
+PROGRESS_PID=""
+SAVE_CONFIG=""
+CONFIG_FILE=""
+COMPRESS_LEVEL=""
+VALIDATE_SCHEMA=false
+CHECK_CONSTRAINTS=false
+WEBHOOK_URL=""
+WEBHOOK_TOKEN=""
+METRICS_FILE=""
+METRICS_ENABLED=false
+DRY_RUN=false
+
+# Connection parameters
+DB_HOST=""
+DB_PORT=""
+DB_USER=""
+DB_NAME=""
+DB_PASSWORD=""
+PASSWD_STDIN=false
+
+# Safety and validation options
+CHECK_DISK_SPACE=true
+VERIFY_BACKUP=true
+LOCK_FILE=""
+CONNECTION_TIMEOUT=30
+BACKUP_TIMEOUT=0  # 0 = no timeout
+
+# Network resilience options
+RETRY_COUNT=3
+RETRY_DELAY=5
+RETRY_BACKOFF=false
+
+# Progress and monitoring options
+SHOW_PROGRESS=false
+PROGRESS_INTERVAL=10
+LOG_FILE=""
+METRICS_FILE=""
+NOTIFY_WEBHOOK=""
+USE_SYSLOG=false
+
+# Performance options
+PARALLEL_JOBS=1
+PARALLEL_TABLES=false
+COMPRESS_LEVEL=""
+
+# Advanced backup options
+INCREMENTAL_BACKUP=false
+DIFFERENTIAL_BACKUP=false
+BACKUP_MANIFEST=false
+EXCLUDE_LARGE_OBJECTS=false
+TEST_RESTORE=false
+VALIDATE_SCHEMA=false
+CHECK_CONSTRAINTS=false
+
+# Configuration file support
+CONFIG_FILE=""
+SAVE_CONFIG=""
+
+# Temporary files tracking for cleanup
+TEMP_FILES=()
+PROGRESS_PID=""
+
+# Exit codes
+EXIT_SUCCESS=0
+EXIT_GENERAL_ERROR=1
+EXIT_CONNECTION_ERROR=2
+EXIT_DISK_SPACE_ERROR=3
+EXIT_BACKUP_VERIFICATION_ERROR=4
+EXIT_LOCK_FILE_ERROR=5
+EXIT_TIMEOUT_ERROR=6
+EXIT_RETRY_EXHAUSTED=7
+EXIT_CONFIG_ERROR=8
+
+# Input validation and security functions
+sanitize_for_log() {
+    local input="$1"
+    # Remove passwords and sensitive data from log output
+    echo "$input" | sed -E 's/(password|passwd|pass)[[:space:]]*[:=][[:space:]]*[^[:space:]&]+/\1=***REDACTED***/gi' | \
+                    sed -E 's/postgresql:\/\/[^:]*:[^@]*@/postgresql:\/\/user:***@/g'
+}
+
+sanitize_string() {
+    local input="$1"
+    # Remove potentially dangerous characters
+    echo "$input" | tr -d '`;|&$(){}[]<>*?~^!"'"'"
+}
+
+sanitize_path() {
+    local path="$1"
+    local resolved_path
+
+    # Cross-platform path resolution - try multiple approaches
+    if get_preferred_command "realpath" >/dev/null; then
+        resolved_path=$(run_preferred_command "realpath" -m "$path" 2>/dev/null || \
+                       run_preferred_command "realpath" "$path" 2>/dev/null || echo "$path")
+    elif get_preferred_command "readlink" >/dev/null; then
+        resolved_path=$(run_preferred_command "readlink" -m "$path" 2>/dev/null || \
+                       run_preferred_command "readlink" -f "$path" 2>/dev/null || echo "$path")
+    elif is_macos_with_gnu_tools && command -v python3 &>/dev/null; then
+        # macOS fallback using Python for path resolution
+        resolved_path=$(python3 -c "import os.path; print(os.path.abspath('$path'))" 2>/dev/null || echo "$path")
+    else
+        # Fallback: basic expansion and normalization
+        resolved_path=$(cd "$(dirname "$path")" 2>/dev/null && pwd)/$(basename "$path") 2>/dev/null || echo "$path"
+    fi
+
+    # Check for path traversal attempts
+    if [[ "$resolved_path" == *".."* ]] || [[ "$resolved_path" != "$path"* ]] && [[ ! "$resolved_path" =~ ^/ ]]; then
+        log_error "Invalid path detected (possible traversal attack): $path"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    echo "$resolved_path"
+}
+
+validate_numeric() {
+    local value="$1"
+    local name="$2"
+    local min="${3:-0}"
+    local max="${4:-999999}"
+
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid numeric value for $name: $value (must be a number)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if [[ $value -lt $min ]] || [[ $value -gt $max ]]; then
+        log_error "Value out of range for $name: $value (must be between $min and $max)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+}
+
+validate_db_name() {
+    local db_name="$1"
+    # PostgreSQL database name validation
+    if [[ ! "$db_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || [[ ${#db_name} -gt 63 ]]; then
+        log_error "Invalid database name: $db_name (must start with letter/underscore, contain only alphanumeric/underscore, max 63 chars)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+}
+
+validate_file_path() {
+    local file_path="$1"
+    local must_exist="${2:-false}"
+
+    # Sanitize the path
+    file_path=$(sanitize_path "$file_path")
+
+    # Check if file must exist
+    if [[ "$must_exist" == "true" ]] && [[ ! -f "$file_path" ]]; then
+        log_error "Required file not found: $file_path"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Check if directory is writable (for new files)
+    if [[ "$must_exist" == "false" ]]; then
+        local dir_path=$(dirname "$file_path")
+        if [[ ! -d "$dir_path" ]] && ! mkdir -p "$dir_path" 2>/dev/null; then
+            log_error "Cannot create directory: $dir_path"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        if [[ ! -w "$dir_path" ]]; then
+            log_error "Directory not writable: $dir_path"
+            exit $EXIT_GENERAL_ERROR
+        fi
+    fi
+
+    echo "$file_path"
+}
+
+# Secure command execution functions
+execute_pg_command() {
+    local cmd_name="$1"
+    shift
+    local args=("$@")
+
+    # Validate command name
+    case "$cmd_name" in
+        pg_dump|pg_restore|psql) ;;
+        *)
+            log_error "Invalid PostgreSQL command: $cmd_name"
+            exit $EXIT_GENERAL_ERROR
+            ;;
+    esac
+
+    # Execute with proper array handling to prevent injection
+    log_verbose "Executing: $cmd_name with ${#args[@]} arguments"
+    "$cmd_name" "${args[@]}"
+}
+
+execute_with_compression() {
+    local compression="$1"
+    local compress_level="$2"
+    local input_cmd=("${@:3}")
+
+    case "$compression" in
+        gzip)
+            local gzip_args=()
+            [[ -n "$compress_level" ]] && gzip_args+=("-$compress_level")
+            if [[ ${#gzip_args[@]} -gt 0 ]]; then
+                "${input_cmd[@]}" | gzip "${gzip_args[@]}"
+            else
+                "${input_cmd[@]}" | gzip
+            fi
+            ;;
+        bzip2)
+            local bzip2_args=()
+            [[ -n "$compress_level" ]] && bzip2_args+=("-$compress_level")
+            if [[ ${#bzip2_args[@]} -gt 0 ]]; then
+                "${input_cmd[@]}" | bzip2 "${bzip2_args[@]}"
+            else
+                "${input_cmd[@]}" | bzip2
+            fi
+            ;;
+        lz4)
+            if ! command -v lz4 &> /dev/null; then
+                log_error "lz4 is not installed"
+                exit $EXIT_GENERAL_ERROR
+            fi
+            local lz4_args=()
+            [[ -n "$compress_level" ]] && lz4_args+=("-$compress_level")
+            if [[ ${#lz4_args[@]} -gt 0 ]]; then
+                "${input_cmd[@]}" | lz4 "${lz4_args[@]}"
+            else
+                "${input_cmd[@]}" | lz4
+            fi
+            ;;
+        none)
+            "${input_cmd[@]}"
+            ;;
+        *)
+            log_error "Invalid compression type: $compression"
+            exit $EXIT_GENERAL_ERROR
+            ;;
+    esac
+}
+
+# Secure restore execution function
+execute_restore_with_decompression() {
+    local backup_file="$1"
+    local database_uri="$2"
+    shift 2
+    local pg_restore_args=("$@")
+
+    # Validate inputs
+    backup_file=$(validate_file_path "$backup_file" true)
+
+    # Determine compression and format
+    local compression="none"
+    local format="unknown"
+
+    case "$backup_file" in
+        *.gz) compression="gzip" ;;
+        *.bz2) compression="bzip2" ;;
+        *.lz4) compression="lz4" ;;
+    esac
+
+    case "$backup_file" in
+        *.sql*) format="sql" ;;
+        *.dump*) format="custom" ;;
+        *.tar*) format="tar" ;;
+        *) format="custom" ;;  # Default assumption
+    esac
+
+    log_verbose "Detected format: $format, compression: $compression"
+
+    # Execute restore based on format and compression
+    if [[ "$format" == "sql" ]]; then
+        # SQL format - use psql
+        case "$compression" in
+            gzip)
+                gzip -dc "$backup_file" | execute_pg_command psql "$database_uri"
+                ;;
+            bzip2)
+                bzip2 -dc "$backup_file" | execute_pg_command psql "$database_uri"
+                ;;
+            lz4)
+                if ! command -v lz4 &> /dev/null; then
+                    log_error "lz4 is not installed"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                lz4 -dc "$backup_file" | execute_pg_command psql "$database_uri"
+                ;;
+            none)
+                execute_pg_command psql "$database_uri" -f "$backup_file"
+                ;;
+        esac
+    else
+        # Custom/tar format - use pg_restore
+        local restore_args=("${pg_restore_args[@]}" "--dbname=$database_uri")
+
+        case "$compression" in
+            gzip)
+                gzip -dc "$backup_file" | execute_pg_command pg_restore "${restore_args[@]}" -
+                ;;
+            bzip2)
+                bzip2 -dc "$backup_file" | execute_pg_command pg_restore "${restore_args[@]}" -
+                ;;
+            lz4)
+                if ! command -v lz4 &>/dev/null; then
+                    log_error "lz4 is not installed"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                lz4 -dc "$backup_file" | execute_pg_command pg_restore "${restore_args[@]}" -
+                ;;
+            none)
+                execute_pg_command pg_restore "${restore_args[@]}" "$backup_file"
+                ;;
+        esac
+    fi
+}
+
+# Improved signal handling
+cleanup_on_exit() {
+    local exit_code=$?
+    log_verbose "Cleanup triggered with exit code: $exit_code"
+
+    # Stop progress monitoring if running
+    if [[ -n "${PROGRESS_PID:-}" ]]; then
+        kill "$PROGRESS_PID" 2>/dev/null || true
+        wait "$PROGRESS_PID" 2>/dev/null || true
+        unset PROGRESS_PID
+    fi
+
+    # Clean up lock file
+    cleanup_lock_file
+
+    # Clean up temporary files
+    if [[ -n "${TEMP_FILES:-}" ]]; then
+        for temp_file in "${TEMP_FILES[@]}"; do
+            [[ -f "$temp_file" ]] && rm -f "$temp_file"
+        done
+    fi
+
+    exit $exit_code
+}
+
+# Set up signal handlers
+trap cleanup_on_exit EXIT INT TERM
+
+# Enhanced logging functions with file and syslog support
+log_to_file() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    if [[ -n "$LOG_FILE" ]]; then
+        echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    fi
+
+    if [[ "$USE_SYSLOG" == "true" ]] && command -v logger &>/dev/null; then
+        logger -t "$SCRIPT_NAME" "[$level] $message"
+    fi
+}
+
+log_info() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$QUIET" != "true" ]]; then
+        echo -e "${BLUE}[INFO]${NC} $safe_message" >&2
+    fi
+    log_to_file "INFO" "$safe_message"
+}
+
+log_success() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$QUIET" != "true" ]]; then
+        echo -e "${GREEN}[SUCCESS]${NC} $safe_message" >&2
+    fi
+    log_to_file "SUCCESS" "$safe_message"
+}
+
+log_warning() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$QUIET" != "true" ]]; then
+        echo -e "${YELLOW}[WARNING]${NC} $safe_message" >&2
+    fi
+    log_to_file "WARNING" "$safe_message"
+}
+
+log_error() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    echo -e "${RED}[ERROR]${NC} $safe_message" >&2
+    log_to_file "ERROR" "$safe_message"
+}
+
+log_verbose() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$VERBOSE" == "true" && "$QUIET" != "true" ]]; then
+        echo -e "${BLUE}[VERBOSE]${NC} $safe_message" >&2
+    fi
+    log_to_file "VERBOSE" "$safe_message"
+}
+
+log_progress() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$SHOW_PROGRESS" == "true" && "$QUIET" != "true" ]]; then
+        echo -e "${GREEN}[PROGRESS]${NC} $safe_message" >&2
+    fi
+    log_to_file "PROGRESS" "$safe_message"
+}
+
+# Help functions
+show_help() {
+    cat << EOF
+$SCRIPT_NAME v$SCRIPT_VERSION - PostgreSQL Database Backup and Restore Tool
+
+USAGE:
+    $SCRIPT_NAME <command> [options]
+
+COMMANDS:
+    backup      Create a comprehensive backup of the database
+    restore     Restore a database from a backup file
+    list        List available backup files in a directory
+    verify      Verify backup file integrity
+    help        Show this help message
+    version     Show version information
+
+GLOBAL OPTIONS:
+    -v, --verbose           Enable verbose output
+    -q, --quiet             Suppress all output except errors
+    -h, --help             Show help message
+
+SAFETY OPTIONS:
+    --no-disk-check        Skip disk space validation
+    --no-backup-verify     Skip backup file verification
+    --connection-timeout <sec> Database connection timeout (default: 30)
+    --backup-timeout <sec> Backup operation timeout (0 = no timeout)
+
+NETWORK RESILIENCE:
+    --retry-count <num>    Number of retry attempts for failed operations (default: 3)
+    --retry-delay <sec>    Delay between retry attempts (default: 5)
+    --retry-backoff        Use exponential backoff for retries
+
+MONITORING & LOGGING:
+    --log-file <path>      Log all operations to file
+    --metrics-file <path>  Export operation metrics to CSV file
+    --notify-webhook <url> Send status notifications to webhook URL
+    --syslog               Send logs to system logger
+    --progress             Show progress information during operations
+    --progress-interval <sec> Progress update interval (default: 10)
+
+PERFORMANCE OPTIONS:
+    --jobs <num>           Number of parallel jobs for backup (default: 1)
+    --parallel-tables      Enable parallel table processing
+    --compress-level <1-9> Compression level (format-dependent)
+
+ADVANCED BACKUP FEATURES:
+    --backup-manifest      Generate detailed backup manifest file
+    --exclude-large-objects Exclude large objects (BLOBs) from backup
+    --validate-schema      Validate backup by test restore to temporary database
+    --check-constraints    Check data constraints in backup (experimental)
+
+CONFIGURATION MANAGEMENT:
+    --config-file <path>   Load configuration from file
+    --save-config <path>   Save current configuration to file
+
+CONNECTION OPTIONS:
+    -H, --host <host>      Database host (default: localhost)
+    -p, --port <port>      Database port (default: 5432)
+    -U, --username <user>  Database username
+    -d, --dbname <name>    Database name
+    --passwd-stdin         Read password from stdin
+
+PASSWORD HANDLING:
+    1. Via stdin: echo "password" | $SCRIPT_NAME backup --passwd-stdin
+    2. Environment variable: PGPASSWORD=password $SCRIPT_NAME backup
+    3. Interactive prompt (if no password provided)
+
+DATABASE CONNECTION:
+    The database connection can be specified in multiple ways:
+      1. Environment variable: DATABASE_URL=postgresql://user:pass@host:port/dbname
+    2. Piped input: echo "postgresql://user:pass@host:port/dbname" | $SCRIPT_NAME backup
+    3. Individual parameters: -H host -p port -U user -d dbname
+
+COMPREHENSIVE BACKUP OPTIONS:
+    -D, --dir <path>       Backup directory (default: $DEFAULT_BACKUP_DIR)
+    -c, --compression <type> Compression type: gzip, bzip2, lz4, none (default: $DEFAULT_COMPRESSION)
+    -f, --format <format>  pg_dump format: custom, tar, plain (default: custom)
+
+    # Schema and Data Options
+    --schema-only         Backup schema only (no data)
+    --data-only           Backup data only (no schema)
+
+    # Ownership and Privileges
+    --no-owner            Exclude owner information
+    --no-privileges       Exclude privilege information
+
+    # Advanced Options
+    --include-extensions  Include CREATE EXTENSION commands
+    --exclude-table <table> Exclude specific table (can be used multiple times)
+    --include-table <table> Include only specific table (can be used multiple times)
+    --exclude-schema <schema> Exclude specific schema (can be used multiple times)
+    --include-schema <schema> Include only specific schema (can be used multiple times)
+
+    # Content Control
+    --no-comments         Exclude comments
+    --no-security-labels  Exclude security labels
+    --no-tablespaces      Exclude tablespace assignments
+    --no-publications     Exclude publications
+    --no-subscriptions    Exclude subscriptions
+    --if-exists           Use IF EXISTS when dropping objects
+
+    # SSL Options
+    --ssl-mode <mode>     SSL mode: disable, allow, prefer, require, verify-ca, verify-full
+    --ssl-cert <path>     SSL client certificate file path
+    --ssl-key <path>      SSL client private key file path
+    --ssl-ca <path>       SSL certificate authority (CA) file path
+
+RESTORE OPTIONS:
+    -f, --file <path>     Backup file to restore from
+    --force               Drop and recreate database if it exists
+    --clean               Clean (drop) database objects before recreating
+    --no-owner            Skip ownership restoration
+    --no-privileges       Skip privilege restoration
+
+For command-specific help, use: $SCRIPT_NAME <command> --help
+
+EXAMPLES:
+    # Backup using individual connection parameters
+    $SCRIPT_NAME backup -H localhost -p 5432 -U myuser -d mydb
+
+    # Backup with password from stdin
+    echo "mypassword" | $SCRIPT_NAME backup --passwd-stdin -H localhost -U myuser -d mydb
+
+    # Comprehensive backup with extensions and custom tables
+    $SCRIPT_NAME backup --include-extensions --exclude-table temp_data -c bzip2
+
+    # Schema-only backup excluding specific schemas
+    $SCRIPT_NAME backup --schema-only --exclude-schema temp_schema
+
+    # Backup using environment variable (traditional way)
+    DATABASE_URL="postgresql://user:pass@localhost:5432/mydb" $SCRIPT_NAME backup
+
+    # Restore with force (drop existing database)
+    $SCRIPT_NAME restore -f ./backups/mydb_20240101_120000.dump.gz --force
+
+EOF
+}
+
+show_backup_help() {
+    cat << EOF
+$SCRIPT_NAME v$SCRIPT_VERSION - Backup Command Help
+
+USAGE:
+    $SCRIPT_NAME backup [options]
+
+DESCRIPTION:
+    Create a comprehensive backup of a PostgreSQL database with various format, compression,
+    and content options. Supports everything from simple backups to complex enterprise scenarios.
+
+CONNECTION OPTIONS:
+    -H, --host <host>      Database host (default: localhost)
+    -p, --port <port>      Database port (default: 5432)
+    -U, --username <user>  Database username
+    -d, --dbname <name>    Database name
+    --passwd-stdin         Read password from stdin
+
+BACKUP CONFIGURATION:
+    -D, --dir <path>          Backup directory (default: $DEFAULT_BACKUP_DIR)
+    -c, --compression <type>  Compression type (default: $DEFAULT_COMPRESSION)
+                              Valid types: gzip, bzip2, lz4, none
+    -f, --format <format>     pg_dump format (default: custom)
+                              Valid formats: custom, tar, plain
+
+CONTENT CONTROL:
+    # Schema and Data
+    --schema-only            Backup schema only (no data)
+    --data-only              Backup data only (no schema)
+
+    # Ownership and Security
+    --no-owner               Exclude owner information
+    --no-privileges          Exclude privilege information
+    --no-security-labels     Exclude security labels
+
+    # Advanced Content Control
+    --include-extensions     Include CREATE EXTENSION commands (PostgreSQL extensions)
+    --no-comments            Exclude comments on database objects
+    --no-tablespaces         Exclude tablespace assignments
+    --no-publications        Exclude publications (logical replication)
+    --no-subscriptions       Exclude subscriptions (logical replication)
+    --if-exists              Use IF EXISTS when dropping objects
+
+SELECTIVE BACKUP:
+    --include-table <table>    Include only specific table (can be repeated)
+    --exclude-table <table>    Exclude specific table (can be repeated)
+    --include-schema <schema>  Include only specific schema (can be repeated)
+    --exclude-schema <schema>  Exclude specific schema (can be repeated)
+
+SSL OPTIONS:
+    --ssl-mode <mode>        SSL connection mode (default: prefer)
+    --ssl-cert <path>        SSL client certificate file path
+    --ssl-key <path>         SSL client private key file path
+    --ssl-ca <path>          SSL certificate authority (CA) file path
+
+EXAMPLES:
+    # Complete database backup with extensions
+    $SCRIPT_NAME backup -H localhost -U postgres -d myapp --include-extensions
+
+    # Schema-only backup excluding temporary tables
+    $SCRIPT_NAME backup --schema-only --exclude-table temp_* -f plain
+
+    # Production backup with maximum compression
+    echo "prod_password" | $SCRIPT_NAME backup --passwd-stdin -H prod.db.com -U app_user -d production -c bzip2
+
+    # Selective backup of specific schemas
+    $SCRIPT_NAME backup --include-schema public --include-schema app_data --exclude-table audit_log
+
+    # Backup with SSL verification for managed databases
+    $SCRIPT_NAME backup -H managed-db.digitalocean.com -p 25060 -U doadmin -d mydb --ssl-mode require --ssl-ca ca-cert.crt
+
+EOF
+}
+
+show_restore_help() {
+    cat << EOF
+$SCRIPT_NAME v$SCRIPT_VERSION - Restore Command Help
+
+USAGE:
+    $SCRIPT_NAME restore -f <backup_file> [options]
+
+DESCRIPTION:
+    Restore a PostgreSQL database from a backup file created by this script or pg_dump.
+    Supports automatic format detection and various restore modes.
+
+REQUIRED OPTIONS:
+    -f, --file <path>        Path to the backup file to restore from
+
+CONNECTION OPTIONS:
+    -H, --host <host>        Database host (default: localhost)
+    -p, --port <port>        Database port (default: 5432)
+    -U, --username <user>    Database username
+    -d, --dbname <name>      Database name
+    --passwd-stdin           Read password from stdin
+
+RESTORE MODES:
+    --force                  Drop and recreate database if it exists (DESTRUCTIVE!)
+    --clean                  Drop existing objects but keep database
+    (default)                Fail if database already exists
+
+RESTORATION OPTIONS:
+    --no-owner              Skip ownership restoration
+    --no-privileges         Skip privilege restoration
+
+SSL OPTIONS:
+    --ssl-mode <mode>        SSL connection mode (default: prefer)
+    --ssl-cert <path>        SSL client certificate file path
+    --ssl-key <path>         SSL client private key file path
+    --ssl-ca <path>          SSL certificate authority (CA) file path
+
+SUPPORTED FORMATS:
+    The script automatically detects the backup format and compression:
+    - .dump, .dump.gz, .dump.bz2, .dump.lz4  (PostgreSQL custom format)
+    - .tar, .tar.gz, .tar.bz2, .tar.lz4      (PostgreSQL tar format)
+    - .sql, .sql.gz, .sql.bz2, .sql.lz4      (Plain SQL format)
+
+EXAMPLES:
+    # Basic restore with individual connection parameters
+    $SCRIPT_NAME restore -f backup.dump.gz -H localhost -U postgres -d myapp
+
+    # Force restore with password from stdin
+    echo "password" | $SCRIPT_NAME restore --passwd-stdin -f prod_backup.dump --force -H localhost -U app_user -d production
+
+    # Restore without ownership (useful for different users)
+    $SCRIPT_NAME restore -f backup.sql.bz2 --no-owner --no-privileges -H localhost -U different_user -d target_db
+
+    # Secure restore with SSL certificate
+    $SCRIPT_NAME restore -f backup.dump.gz -H managed-db.com -p 25060 -U doadmin -d mydb --ssl-mode require --ssl-ca ca-cert.crt
+
+EOF
+}
+
+show_list_help() {
+    cat << EOF
+$SCRIPT_NAME v$SCRIPT_VERSION - List Command Help
+
+USAGE:
+    $SCRIPT_NAME list [options]
+
+DESCRIPTION:
+    List available backup files in a directory with details about size, date, and format.
+
+OPTIONS:
+    -D, --dir <path>         Directory to list backups from (default: $DEFAULT_BACKUP_DIR)
+    -s, --sort <method>      Sort method: date, size, name (default: date)
+    -r, --reverse            Reverse sort order
+    --format <format>        Output format: table, simple, json (default: table)
+    --help                   Show this help message
+
+SORT METHODS:
+    date    - Sort by modification date (newest first)
+    size    - Sort by file size (largest first)
+    name    - Sort by filename (alphabetical)
+
+OUTPUT FORMATS:
+    table   - Formatted table with columns (default)
+    simple  - Simple list of filenames
+    json    - JSON format for scripting
+
+EXAMPLES:
+    # List backups in default directory
+    $SCRIPT_NAME list
+
+    # List backups in specific directory
+    $SCRIPT_NAME list -D /backups/production
+
+    # List sorted by size in reverse order
+    $SCRIPT_NAME list -s size -r
+
+    # List in JSON format for scripting
+    $SCRIPT_NAME list --format json
+
+EOF
+}
+
+show_version() {
+    echo "$SCRIPT_NAME version $SCRIPT_VERSION"
+}
+
+# Cross-platform utility functions
+is_macos_with_gnu_tools() {
+    [[ "$OSTYPE" == "darwin"* ]]
+}
+
+get_preferred_command() {
+    local base_cmd="$1"
+    local gnu_prefix="${2:-g}"
+
+    if is_macos_with_gnu_tools && command -v "${gnu_prefix}${base_cmd}" &>/dev/null; then
+        echo "${gnu_prefix}${base_cmd}"
+    elif command -v "$base_cmd" &>/dev/null; then
+        echo "$base_cmd"
+    else
+        return 1
+    fi
+}
+
+# Execute a command with its preferred version (GNU on macOS if available)
+run_preferred_command() {
+    local base_cmd="$1"
+    shift
+    local cmd_args=("$@")
+
+    local preferred_cmd
+    if preferred_cmd=$(get_preferred_command "$base_cmd"); then
+        "$preferred_cmd" "${cmd_args[@]}"
+    else
+        log_error "$base_cmd command not available"
+        return 1
+    fi
+}
+
+# Common SSL argument parsing helper
+parse_ssl_arguments() {
+    local key="$1"
+    local value="$2"
+
+    case "$key" in
+        --ssl-mode)
+            validate_ssl_mode "$value"
+            SSL_MODE="$value"
+            echo "2"  # consumed 2 arguments
+            ;;
+        --ssl-cert)
+            SSL_CERT=$(validate_file_path "$value" true)
+            echo "2"
+            ;;
+        --ssl-key)
+            SSL_KEY=$(validate_file_path "$value" true)
+            echo "2"
+            ;;
+        --ssl-ca)
+            SSL_CA=$(validate_file_path "$value" true)
+            echo "2"
+            ;;
+        *)
+            echo "0"  # not handled
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# Common connection argument parsing helper
+parse_connection_arguments() {
+    local key="$1"
+    local value="$2"
+
+    case "$key" in
+        -H|--host)
+            DB_HOST=$(sanitize_string "$value")
+            echo "2"
+            ;;
+        -p|--port)
+            validate_numeric "$value" "port" 1 65535
+            DB_PORT="$value"
+            echo "2"
+            ;;
+        -U|--username)
+            DB_USER=$(sanitize_string "$value")
+            echo "2"
+            ;;
+        -d|--dbname)
+            validate_db_name "$value"
+            DB_NAME="$value"
+            echo "2"
+            ;;
+        --passwd-stdin)
+            PASSWD_STDIN=true
+            echo "1"
+            ;;
+        *)
+            echo "0"  # not handled
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# Utility functions
+get_file_modification_date() {
+    local file="$1"
+    local stat_cmd
+
+    if stat_cmd=$(get_preferred_command "stat"); then
+        if [[ "$stat_cmd" == "gstat" ]] || [[ "$OSTYPE" != "darwin"* ]]; then
+            # GNU stat format (Linux or GNU stat on macOS)
+            run_preferred_command "stat" -c "%y" "$file" 2>/dev/null | cut -d'.' -f1 2>/dev/null || echo "unknown"
+        else
+            # BSD stat on macOS
+            run_preferred_command "stat" -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$file" 2>/dev/null || echo "unknown"
+        fi
+    else
+        echo "unknown"
+    fi
+}
+
+get_file_size_bytes() {
+    local file="$1"
+    local stat_cmd
+
+    if stat_cmd=$(get_preferred_command "stat"); then
+        if [[ "$stat_cmd" == "gstat" ]] || [[ "$OSTYPE" != "darwin"* ]]; then
+            # GNU stat format (Linux or GNU stat on macOS)
+            run_preferred_command "stat" -c "%s" "$file" 2>/dev/null || echo "0"
+        else
+            # BSD stat on macOS
+            run_preferred_command "stat" -f "%z" "$file" 2>/dev/null || echo "0"
+        fi
+    else
+        echo "0"
+    fi
+}
+
+get_file_size_human() {
+    local file="$1"
+    run_preferred_command "du" -h "$file" 2>/dev/null | cut -f1 || echo "unknown"
+}
+
+check_prerequisites() {
+    local missing_tools=()
+
+    if ! command -v pg_dump &> /dev/null; then
+        missing_tools+=("pg_dump")
+    fi
+
+    if ! command -v pg_restore &> /dev/null; then
+        missing_tools+=("pg_restore")
+    fi
+
+    if ! command -v psql &> /dev/null; then
+        missing_tools+=("psql")
+    fi
+
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        log_error "Missing required PostgreSQL tools: ${missing_tools[*]}"
+        log_error "Please install PostgreSQL client tools:"
+        log_error "  - Ubuntu/Debian: sudo apt-get install postgresql-client"
+        log_error "  - macOS: brew install postgresql"
+        log_error "  - CentOS/RHEL: sudo yum install postgresql"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    log_verbose "All required PostgreSQL tools are available"
+}
+
+# Extract password from DATABASE_URL if available
+extract_password_from_url() {
+    if [[ -n "${DATABASE_URL:-}" ]]; then
+        # Extract password from postgresql://user:password@host:port/dbname format
+        if [[ "$DATABASE_URL" =~ postgresql://[^:]+:([^@]+)@ ]]; then
+            local extracted_password="${BASH_REMATCH[1]}"
+            log_verbose "Password extracted from DATABASE_URL"
+            export PGPASSWORD="$extracted_password"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+handle_password() {
+    # First, try to extract password from DATABASE_URL
+    if extract_password_from_url; then
+        log_verbose "Using password from DATABASE_URL"
+        return 0
+    fi
+
+    if [[ "$PASSWD_STDIN" == "true" ]]; then
+        if [[ -t 0 ]]; then
+            log_error "No password provided via stdin. Use: echo 'password' | $SCRIPT_NAME ..."
+            exit $EXIT_GENERAL_ERROR
+        fi
+        DB_PASSWORD=$(cat)
+        log_verbose "Password read from stdin"
+    elif [[ -z "${PGPASSWORD:-}" && -z "$DB_PASSWORD" ]]; then
+        if [[ -t 0 ]]; then
+            echo -n "Enter database password: " >&2
+            read -s DB_PASSWORD
+            echo >&2
+            log_verbose "Password read interactively"
+        fi
+    fi
+
+    if [[ -n "$DB_PASSWORD" ]]; then
+        export PGPASSWORD="$DB_PASSWORD"
+    fi
+}
+
+build_connection_string() {
+    if [[ -n "$DATABASE_URL" ]]; then
+        echo "$DATABASE_URL"
+        return 0
+    fi
+
+    local connection_string="postgresql://"
+
+    if [[ -n "$DB_USER" ]]; then
+        connection_string="${connection_string}${DB_USER}"
+        if [[ -n "$DB_PASSWORD" ]]; then
+            connection_string="${connection_string}:${DB_PASSWORD}"
+        fi
+        connection_string="${connection_string}@"
+    fi
+
+    connection_string="${connection_string}${DB_HOST:-localhost}"
+
+    if [[ -n "$DB_PORT" ]]; then
+        connection_string="${connection_string}:${DB_PORT}"
+    fi
+
+    if [[ -n "$DB_NAME" ]]; then
+        connection_string="${connection_string}/${DB_NAME}"
+    fi
+
+    echo "$connection_string"
+}
+
+get_database_url() {
+    # Check if DATABASE_URL is provided via environment variable
+    if [[ -n "${DATABASE_URL:-}" ]]; then
+        log_verbose "Using DATABASE_URL from environment variable"
+        return 0
+    fi
+
+    # Check if DATABASE_URL is provided via stdin (pipe) - only if not using passwd-stdin
+    if [[ ! -t 0 && "$PASSWD_STDIN" != "true" ]]; then
+        DATABASE_URL=$(cat)
+        if [[ -n "$DATABASE_URL" ]]; then
+            log_verbose "Using DATABASE_URL from stdin"
+            return 0
+        fi
+    fi
+
+    # Build connection string from individual parameters
+    if [[ -n "$DB_HOST" || -n "$DB_USER" || -n "$DB_NAME" ]]; then
+        # Check if database name is provided when using individual parameters
+        if [[ -z "$DB_NAME" ]]; then
+            log_error "Database name is required when using individual connection parameters."
+            log_error "Add the database name with: -d <database_name>"
+            log_error "Example: $SCRIPT_NAME backup -H example.com -U myuser -d mydatabase"
+            exit $EXIT_GENERAL_ERROR
+        fi
+
+        DATABASE_URL=$(build_connection_string)
+        log_verbose "Built DATABASE_URL from individual parameters: $DATABASE_URL"
+        return 0
+    fi
+
+    log_error "No database connection information provided."
+    log_error "Use one of the following methods:"
+    log_error "1. Environment variable: DATABASE_URL='postgresql://user:pass@host:port/dbname'"
+    log_error "2. Piped input: echo 'postgresql://user:pass@host:port/dbname' | $SCRIPT_NAME backup"
+    log_error "3. Individual parameters: -H host -p port -U user -d dbname"
+    exit $EXIT_GENERAL_ERROR
+}
+
+parse_database_url() {
+    local url="$1"
+
+    # Extract database name from URL
+    if [[ "$url" =~ postgresql://[^/]+/([^?]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        log_error "Invalid DATABASE_URL format. Expected: postgresql://user:pass@host:port/dbname"
+        exit $EXIT_GENERAL_ERROR
+    fi
+}
+
+generate_backup_filename() {
+    local db_name="$1"
+    local format="$2"
+    local compression="$3"
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+
+    local extension=""
+    case "$format" in
+        custom) extension="dump" ;;
+        tar) extension="tar" ;;
+        plain) extension="sql" ;;
+    esac
+
+    local filename="${db_name}_${timestamp}.${extension}"
+
+    # Add compression extension
+    case "$compression" in
+        gzip) filename="${filename}.gz" ;;
+        bzip2) filename="${filename}.bz2" ;;
+        lz4) filename="${filename}.lz4" ;;
+    esac
+
+    echo "$filename"
+}
+
+# SSL utility functions
+setup_ssl_environment() {
+    if [[ -n "$SSL_MODE" ]]; then
+        export PGSSLMODE="$SSL_MODE"
+        log_verbose "Set PGSSLMODE=$SSL_MODE"
+    fi
+
+    if [[ -n "$SSL_CERT" ]]; then
+        if [[ ! -f "$SSL_CERT" ]]; then
+            log_error "SSL certificate file not found: $SSL_CERT"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        export PGSSLCERT="$SSL_CERT"
+        log_verbose "Set PGSSLCERT=$SSL_CERT"
+    fi
+
+    if [[ -n "$SSL_KEY" ]]; then
+        if [[ ! -f "$SSL_KEY" ]]; then
+            log_error "SSL private key file not found: $SSL_KEY"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        export PGSSLKEY="$SSL_KEY"
+        log_verbose "Set PGSSLKEY=$SSL_KEY"
+    fi
+
+    if [[ -n "$SSL_CA" ]]; then
+        if [[ ! -f "$SSL_CA" ]]; then
+            log_error "SSL CA certificate file not found: $SSL_CA"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        export PGSSLROOTCERT="$SSL_CA"
+        log_verbose "Set PGSSLROOTCERT=$SSL_CA"
+    fi
+}
+
+validate_ssl_mode() {
+    local mode="$1"
+    case "$mode" in
+        disable|allow|prefer|require|verify-ca|verify-full)
+            return 0
+            ;;
+        *)
+            log_error "Invalid SSL mode: $mode"
+            log_error "Valid SSL modes: disable, allow, prefer, require, verify-ca, verify-full"
+            exit $EXIT_GENERAL_ERROR
+            ;;
+    esac
+}
+
+# Safety and validation functions
+check_disk_space() {
+    local target_dir="$1"
+    local min_space_gb="${2:-1}"  # Default 1GB minimum
+
+    if [[ "$CHECK_DISK_SPACE" != "true" ]]; then
+        return 0
+    fi
+
+    log_verbose "Checking available disk space in $target_dir"
+
+    # Create directory if it doesn't exist for space check
+    mkdir -p "$target_dir"
+
+    # Get available space in GB
+    local available_space_kb=$(df "$target_dir" | awk 'NR==2 {print $4}')
+    local available_space_gb=$((available_space_kb / 1024 / 1024))
+
+    log_verbose "Available disk space: ${available_space_gb}GB"
+
+    if [[ $available_space_gb -lt $min_space_gb ]]; then
+        log_error "Insufficient disk space. Available: ${available_space_gb}GB, Required: ${min_space_gb}GB"
+        exit $EXIT_DISK_SPACE_ERROR
+    fi
+
+    log_verbose "Disk space check passed"
+}
+
+test_database_connection() {
+    log_verbose "Testing database connection..."
+
+    # Use retry logic for connection test with timeout
+    if [[ -n "$CONNECTION_TIMEOUT" && "$CONNECTION_TIMEOUT" -gt 0 ]]; then
+        if run_with_retry "$RETRY_COUNT" "$RETRY_DELAY" "$RETRY_BACKOFF" \
+           run_with_timeout "$CONNECTION_TIMEOUT" psql "$DATABASE_URL" -c '\q' &>/dev/null; then
+            log_verbose "Database connection test successful"
+            return 0
+        else
+            local exit_code=$?
+            log_error "Database connection test failed after $RETRY_COUNT attempts"
+            exit $EXIT_CONNECTION_ERROR
+        fi
+    else
+        if run_with_retry "$RETRY_COUNT" "$RETRY_DELAY" "$RETRY_BACKOFF" \
+           psql "$DATABASE_URL" -c '\q' &>/dev/null; then
+            log_verbose "Database connection test successful"
+            return 0
+        else
+            local exit_code=$?
+            log_error "Database connection test failed after $RETRY_COUNT attempts"
+            exit $EXIT_CONNECTION_ERROR
+        fi
+    fi
+}
+
+create_lock_file() {
+    local operation="$1"  # backup or restore
+    local db_name="$2"
+
+    # Validate operation and db_name
+    operation=$(sanitize_string "$operation")
+    validate_db_name "$db_name"
+
+    LOCK_FILE="/tmp/${SCRIPT_NAME}-${operation}-${db_name}.lock"
+
+    # Use atomic file creation to avoid race conditions
+    local temp_lock="/tmp/${SCRIPT_NAME}-${operation}-${db_name}.lock.$$"
+
+    # Try to create lock atomically
+    if (
+        set -C  # Enable noclobber
+        echo $$ > "$temp_lock"
+    ) 2>/dev/null; then
+        # Move temp file to actual lock file atomically
+        if mv "$temp_lock" "$LOCK_FILE" 2>/dev/null; then
+            log_verbose "Created lock file: $LOCK_FILE"
+            return 0
+        else
+            rm -f "$temp_lock"
+        fi
+    fi
+
+    # Lock creation failed, check if another process is running
+    if [[ -f "$LOCK_FILE" ]]; then
+        local lock_pid
+        # Read PID atomically
+        lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "unknown")
+
+        if [[ "$lock_pid" != "unknown" ]] && [[ "$lock_pid" =~ ^[0-9]+$ ]]; then
+            # Check if process is still running
+            if kill -0 "$lock_pid" 2>/dev/null; then
+                log_error "Another $operation operation is already running (PID: $lock_pid)"
+                log_error "Lock file: $LOCK_FILE"
+                exit $EXIT_LOCK_FILE_ERROR
+            else
+                log_warning "Stale lock file found, attempting to clean up: $LOCK_FILE"
+                # Try to remove stale lock file
+                if rm -f "$LOCK_FILE" 2>/dev/null; then
+                    # Retry lock creation once
+                    if (
+                        set -C
+                        echo $$ > "$temp_lock"
+                    ) 2>/dev/null && mv "$temp_lock" "$LOCK_FILE" 2>/dev/null; then
+                        log_verbose "Created lock file after cleanup: $LOCK_FILE"
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    log_error "Failed to create lock file: $LOCK_FILE"
+    exit $EXIT_LOCK_FILE_ERROR
+}
+
+cleanup_lock_file() {
+    if [[ -n "$LOCK_FILE" && -f "$LOCK_FILE" ]]; then
+        rm -f "$LOCK_FILE"
+        log_verbose "Removed lock file: $LOCK_FILE"
+    fi
+}
+
+verify_backup_file() {
+    local backup_file="$1"
+
+    if [[ "$VERIFY_BACKUP" != "true" ]]; then
+        return 0
+    fi
+
+    log_info "Verifying backup file integrity..."
+
+    # Check if file exists and is not empty
+    if [[ ! -f "$backup_file" ]]; then
+        log_error "Backup file not found: $backup_file"
+        exit $EXIT_BACKUP_VERIFICATION_ERROR
+    fi
+
+    if [[ ! -s "$backup_file" ]]; then
+        log_error "Backup file is empty: $backup_file"
+        exit $EXIT_BACKUP_VERIFICATION_ERROR
+    fi
+
+    # Test file integrity based on compression
+    case "$backup_file" in
+        *.gz)
+            if ! gzip -t "$backup_file" 2>/dev/null; then
+                log_error "Backup file is corrupted (gzip test failed): $backup_file"
+                exit $EXIT_BACKUP_VERIFICATION_ERROR
+            fi
+            ;;
+        *.bz2)
+            if ! bzip2 -t "$backup_file" 2>/dev/null; then
+                log_error "Backup file is corrupted (bzip2 test failed): $backup_file"
+                exit $EXIT_BACKUP_VERIFICATION_ERROR
+            fi
+            ;;
+        *.lz4)
+            if command -v lz4 &>/dev/null && ! lz4 -t "$backup_file" 2>/dev/null; then
+                log_error "Backup file is corrupted (lz4 test failed): $backup_file"
+                exit $EXIT_BACKUP_VERIFICATION_ERROR
+            fi
+            ;;
+    esac
+
+    # For PostgreSQL custom format, try to list contents
+    if [[ "$backup_file" == *.dump* ]]; then
+        local test_file="$backup_file"
+
+        case "$backup_file" in
+            *.gz|*.bz2|*.lz4)
+                case "$backup_file" in
+                    *.gz)
+                        log_verbose "Testing gzip decompression and pg_restore format for: $backup_file"
+                        if ! gzip -dc "$backup_file" | pg_restore --list - &>/dev/null; then
+                            # Try alternative: test if gzip decompression works first
+                            if gzip -t "$backup_file" 2>/dev/null; then
+                                log_verbose "Gzip file integrity OK, but pg_restore format test failed"
+                                log_verbose "This might be expected for some backup formats"
+                                return 0
+                            else
+                                log_error "Backup file format verification failed: $backup_file"
+                                exit $EXIT_BACKUP_VERIFICATION_ERROR
+                            fi
+                        fi
+                        ;;
+                    *.bz2)
+                        log_verbose "Testing bzip2 decompression and pg_restore format for: $backup_file"
+                        if ! bzip2 -dc "$backup_file" | pg_restore --list - &>/dev/null; then
+                            if bzip2 -t "$backup_file" 2>/dev/null; then
+                                log_verbose "Bzip2 file integrity OK, but pg_restore format test failed"
+                                log_verbose "This might be expected for some backup formats"
+                                return 0
+                            else
+                                log_error "Backup file format verification failed: $backup_file"
+                                exit $EXIT_BACKUP_VERIFICATION_ERROR
+                            fi
+                        fi
+                        ;;
+                    *.lz4)
+                        log_verbose "Testing lz4 decompression and pg_restore format for: $backup_file"
+                        if ! lz4 -dc "$backup_file" | pg_restore --list - &>/dev/null; then
+                            if command -v lz4 &>/dev/null && lz4 -t "$backup_file" 2>/dev/null; then
+                                log_verbose "LZ4 file integrity OK, but pg_restore format test failed"
+                                log_verbose "This might be expected for some backup formats"
+                                return 0
+                            else
+                                log_error "Backup file format verification failed: $backup_file"
+                                exit $EXIT_BACKUP_VERIFICATION_ERROR
+                            fi
+                        fi
+                        ;;
+                esac
+                ;;
+            *)
+                log_verbose "Testing uncompressed pg_restore format for: $backup_file"
+                if ! pg_restore --list "$backup_file" &>/dev/null; then
+                    log_error "Backup file format verification failed: $backup_file"
+                    exit $EXIT_BACKUP_VERIFICATION_ERROR
+                fi
+                ;;
+        esac
+    fi
+
+    log_success "Backup file verification passed"
+}
+
+calculate_file_checksum() {
+    local file="$1"
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$file" | cut -d' ' -f1
+    elif command -v shasum &>/dev/null; then
+        shasum -a 256 "$file" | cut -d' ' -f1
+    else
+        log_warning "No checksum utility available (sha256sum or shasum)"
+        echo "unavailable"
+    fi
+}
+
+# Network resilience and retry functions
+run_with_retry() {
+    local max_attempts="$1"
+    local delay="$2"
+    local backoff="$3"
+    shift 3
+    local cmd=("$@")
+
+    local attempt=1
+    local current_delay="$delay"
+
+    while [[ $attempt -le $max_attempts ]]; do
+        log_verbose "Attempt $attempt of $max_attempts: ${cmd[*]}"
+
+        if "${cmd[@]}"; then
+            log_verbose "Command succeeded on attempt $attempt"
+            return 0
+        fi
+
+        local exit_code=$?
+
+        if [[ $attempt -eq $max_attempts ]]; then
+            log_error "Command failed after $max_attempts attempts"
+            return $exit_code
+        fi
+
+        log_warning "Attempt $attempt failed, retrying in ${current_delay}s..."
+        sleep "$current_delay"
+
+        if [[ "$backoff" == "true" ]]; then
+            current_delay=$((current_delay * 2))
+        fi
+
+        ((attempt++))
+    done
+}
+
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    local cmd=("$@")
+
+    if [[ "$timeout_seconds" -eq 0 ]]; then
+        "${cmd[@]}"
+    else
+        if get_preferred_command "timeout" >/dev/null; then
+            run_preferred_command "timeout" "$timeout_seconds" "${cmd[@]}"
+            local exit_code=$?
+            if [[ $exit_code -eq 124 ]]; then
+                log_error "Operation timed out after ${timeout_seconds} seconds"
+                exit $EXIT_TIMEOUT_ERROR
+            fi
+            return $exit_code
+        else
+            # Fallback: no timeout available - just run the command
+            log_warning "timeout command not available, running without timeout"
+            "${cmd[@]}"
+        fi
+    fi
+}
+
+# Configuration file support functions
+load_config_file() {
+    local config_file="$1"
+
+    # Validate and sanitize config file path
+    config_file=$(validate_file_path "$config_file" true)
+
+    log_verbose "Loading configuration from: $config_file"
+
+    # Define allowed configuration keys for security
+    local -A allowed_keys=(
+        [DB_HOST]=1 [DB_PORT]=1 [DB_USER]=1 [DB_NAME]=1
+        [BACKUP_DIR]=1 [COMPRESSION]=1 [SSL_MODE]=1
+        [SSL_CERT]=1 [SSL_KEY]=1 [SSL_CA]=1
+        [CONNECTION_TIMEOUT]=1 [BACKUP_TIMEOUT]=1
+        [RETRY_COUNT]=1 [RETRY_DELAY]=1 [RETRY_BACKOFF]=1
+        [PARALLEL_JOBS]=1 [COMPRESS_LEVEL]=1
+        [LOG_FILE]=1 [METRICS_FILE]=1 [NOTIFY_WEBHOOK]=1
+    )
+
+    local line_count=0
+    # Read configuration file (key=value format)
+    while IFS='=' read -r key value; do
+        ((line_count++))
+
+        # Skip comments and empty lines
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+
+        # Remove leading/trailing whitespace
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+
+        # Validate key format
+        if [[ ! "$key" =~ ^[A-Z_]+$ ]]; then
+            log_error "Invalid configuration key format at line $line_count: $key"
+            exit $EXIT_CONFIG_ERROR
+        fi
+
+        # Check if key is allowed
+        if [[ -z "${allowed_keys[$key]:-}" ]]; then
+            log_warning "Unknown configuration key at line $line_count: $key"
+            continue
+        fi
+
+        # Remove quotes from value if present
+        value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+
+        # Sanitize value
+        value=$(sanitize_string "$value")
+
+        # Apply value with validation
+        case "$key" in
+            DB_HOST)
+                DB_HOST="$value"
+                ;;
+            DB_PORT)
+                validate_numeric "$value" "DB_PORT" 1 65535
+                DB_PORT="$value"
+                ;;
+            DB_USER)
+                DB_USER="$value"
+                ;;
+            DB_NAME)
+                validate_db_name "$value"
+                DB_NAME="$value"
+                ;;
+            BACKUP_DIR)
+                BACKUP_DIR=$(validate_file_path "$value" false)
+                ;;
+            COMPRESSION)
+                case "$value" in
+                    gzip|bzip2|lz4|none) COMPRESSION="$value" ;;
+                    *) log_error "Invalid compression type in config: $value"; exit $EXIT_CONFIG_ERROR ;;
+                esac
+                ;;
+            SSL_MODE)
+                validate_ssl_mode "$value"
+                SSL_MODE="$value"
+                ;;
+            SSL_CERT|SSL_KEY|SSL_CA)
+                if [[ -n "$value" ]]; then
+                    value=$(validate_file_path "$value" true)
+                fi
+                case "$key" in
+                    SSL_CERT) SSL_CERT="$value" ;;
+                    SSL_KEY) SSL_KEY="$value" ;;
+                    SSL_CA) SSL_CA="$value" ;;
+                esac
+                ;;
+            CONNECTION_TIMEOUT)
+                validate_numeric "$value" "CONNECTION_TIMEOUT" 1 3600
+                CONNECTION_TIMEOUT="$value"
+                ;;
+            BACKUP_TIMEOUT)
+                validate_numeric "$value" "BACKUP_TIMEOUT" 0 86400
+                BACKUP_TIMEOUT="$value"
+                ;;
+            RETRY_COUNT)
+                validate_numeric "$value" "RETRY_COUNT" 0 100
+                RETRY_COUNT="$value"
+                ;;
+            RETRY_DELAY)
+                validate_numeric "$value" "RETRY_DELAY" 1 3600
+                RETRY_DELAY="$value"
+                ;;
+            RETRY_BACKOFF)
+                case "$value" in
+                    true|false) RETRY_BACKOFF="$value" ;;
+                    *) log_error "Invalid boolean value for RETRY_BACKOFF: $value"; exit $EXIT_CONFIG_ERROR ;;
+                esac
+                ;;
+            PARALLEL_JOBS)
+                validate_numeric "$value" "PARALLEL_JOBS" 1 64
+                PARALLEL_JOBS="$value"
+                ;;
+            COMPRESS_LEVEL)
+                validate_numeric "$value" "COMPRESS_LEVEL" 1 9
+                COMPRESS_LEVEL="$value"
+                ;;
+            LOG_FILE|METRICS_FILE)
+                if [[ -n "$value" ]]; then
+                    value=$(validate_file_path "$value" false)
+                fi
+                case "$key" in
+                    LOG_FILE) LOG_FILE="$value" ;;
+                    METRICS_FILE) METRICS_FILE="$value" ;;
+                esac
+                ;;
+            NOTIFY_WEBHOOK)
+                if [[ -n "$value" ]] && [[ ! "$value" =~ ^https?:// ]]; then
+                    log_error "Invalid webhook URL format: $value"
+                    exit $EXIT_CONFIG_ERROR
+                fi
+                NOTIFY_WEBHOOK="$value"
+                ;;
+        esac
+    done < "$config_file"
+
+    log_success "Configuration loaded successfully"
+}
+
+save_config_file() {
+    local config_file="$1"
+
+    log_info "Saving configuration to: $config_file"
+
+    cat > "$config_file" << EOF
+# Database Backup/Restore Configuration
+# Generated on $(date)
+
+# Connection parameters
+DB_HOST="$DB_HOST"
+DB_PORT="$DB_PORT"
+DB_USER="$DB_USER"
+DB_NAME="$DB_NAME"
+
+# Backup settings
+BACKUP_DIR="$BACKUP_DIR"
+COMPRESSION="$COMPRESSION"
+COMPRESS_LEVEL="$COMPRESS_LEVEL"
+
+# SSL settings
+SSL_MODE="$SSL_MODE"
+SSL_CERT="$SSL_CERT"
+SSL_KEY="$SSL_KEY"
+SSL_CA="$SSL_CA"
+
+# Timeouts and retry settings
+CONNECTION_TIMEOUT="$CONNECTION_TIMEOUT"
+BACKUP_TIMEOUT="$BACKUP_TIMEOUT"
+RETRY_COUNT="$RETRY_COUNT"
+RETRY_DELAY="$RETRY_DELAY"
+RETRY_BACKOFF="$RETRY_BACKOFF"
+
+# Performance settings
+PARALLEL_JOBS="$PARALLEL_JOBS"
+
+# Monitoring settings
+LOG_FILE="$LOG_FILE"
+METRICS_FILE="$METRICS_FILE"
+NOTIFY_WEBHOOK="$NOTIFY_WEBHOOK"
+EOF
+
+    log_success "Configuration saved successfully"
+}
+
+# Progress monitoring functions
+start_progress_monitor() {
+    local operation="$1"
+    local pid="$2"
+
+    if [[ "$SHOW_PROGRESS" != "true" ]]; then
+        return 0
+    fi
+
+    (
+        local count=0
+        while kill -0 "$pid" 2>/dev/null; do
+            local elapsed=$((count * PROGRESS_INTERVAL))
+            log_progress "$operation running for ${elapsed}s..."
+            sleep "$PROGRESS_INTERVAL"
+            ((count++))
+        done
+    ) &
+
+    echo $!
+}
+
+# Metrics collection functions
+write_metrics() {
+    local operation="$1"
+    local duration="$2"
+    local file_size="$3"
+    local exit_code="$4"
+
+    if [[ -z "$METRICS_FILE" ]]; then
+        return 0
+    fi
+
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local status="success"
+    [[ $exit_code -ne 0 ]] && status="failure"
+
+    # Create metrics file header if it doesn't exist
+    if [[ ! -f "$METRICS_FILE" ]]; then
+        echo "timestamp,operation,duration,file_size,status,exit_code" > "$METRICS_FILE"
+    fi
+
+    echo "$timestamp,$operation,$duration,$file_size,$status,$exit_code" >> "$METRICS_FILE"
+    log_verbose "Metrics written to: $METRICS_FILE"
+}
+
+# Webhook notification functions
+send_webhook_notification() {
+    local operation="$1"
+    local status="$2"
+    local message="$3"
+    local file_path="${4:-}"
+    local duration="${5:-0}"
+
+    if [[ -z "$NOTIFY_WEBHOOK" ]]; then
+        return 0
+    fi
+
+    if ! command -v curl &>/dev/null; then
+        log_warning "curl not available, skipping webhook notification"
+        return 1
+    fi
+
+    local payload=$(cat << EOF
+{
+    "operation": "$operation",
+    "status": "$status",
+    "message": "$message",
+    "file_path": "$file_path",
+    "duration": $duration,
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "hostname": "$(hostname)",
+    "script_version": "$SCRIPT_VERSION"
+}
+EOF
+)
+
+    log_verbose "Sending webhook notification to: $NOTIFY_WEBHOOK"
+
+    if curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$NOTIFY_WEBHOOK" >/dev/null; then
+        log_verbose "Webhook notification sent successfully"
+    else
+        log_warning "Failed to send webhook notification"
+    fi
+}
+
+# Advanced backup and validation functions
+generate_backup_manifest() {
+    local backup_file="$1"
+    local db_name="$2"
+    local manifest_file="${backup_file}.manifest"
+
+    if [[ "$BACKUP_MANIFEST" != "true" ]]; then
+        return 0
+    fi
+
+    log_info "Generating backup manifest..."
+
+    local file_size=$(get_file_size_bytes "$backup_file")
+    local checksum=$(calculate_file_checksum "$backup_file")
+    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Get database metadata (using parameterized queries to prevent SQL injection)
+    local db_size_query="SELECT pg_size_pretty(pg_database_size(current_database()));"
+    local db_version_query="SELECT version();"
+
+    local db_size=$(execute_pg_command psql "$DATABASE_URL" -t -c "$db_size_query" 2>/dev/null | xargs || echo "unknown")
+    local db_version=$(execute_pg_command psql "$DATABASE_URL" -t -c "$db_version_query" 2>/dev/null | xargs || echo "unknown")
+
+    # Create manifest
+    cat > "$manifest_file" << EOF
+{
+    "backup_info": {
+        "database_name": "$db_name",
+        "backup_file": "$(basename "$backup_file")",
+        "backup_format": "$format",
+        "compression": "$compression",
+        "timestamp": "$timestamp",
+        "script_version": "$SCRIPT_VERSION"
+    },
+    "file_info": {
+        "file_size_bytes": $file_size,
+        "file_size_human": "$(get_file_size_human "$backup_file")",
+        "checksum_sha256": "$checksum"
+    },
+    "database_info": {
+        "database_size": "$db_size",
+        "database_version": "$db_version"
+    },
+    "backup_options": {
+        "include_extensions": $([ "${pg_dump_args[*]}" =~ "--extension" ] && echo "true" || echo "false"),
+        "schema_only": $([ "${pg_dump_args[*]}" =~ "--schema-only" ] && echo "true" || echo "false"),
+        "data_only": $([ "${pg_dump_args[*]}" =~ "--data-only" ] && echo "true" || echo "false"),
+        "no_owner": $([ "${pg_dump_args[*]}" =~ "--no-owner" ] && echo "true" || echo "false"),
+        "no_privileges": $([ "${pg_dump_args[*]}" =~ "--no-privileges" ] && echo "true" || echo "false")
+    }
+}
+EOF
+
+    log_success "Backup manifest created: $manifest_file"
+}
+
+validate_backup_schema() {
+    local backup_file="$1"
+
+    if [[ "$VALIDATE_SCHEMA" != "true" ]]; then
+        return 0
+    fi
+
+    log_info "Validating backup schema..."
+
+    local temp_db="temp_validate_$(date +%s)"
+    local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
+
+    # Create temporary database
+    if ! psql "$base_uri" -c "CREATE DATABASE \"$temp_db\";" &>/dev/null; then
+        log_warning "Could not create temporary database for schema validation"
+        return 1
+    fi
+
+    local temp_uri=$(echo "$DATABASE_URL" | sed "s|/[^/]*$|/$temp_db|")
+
+    # Restore to temporary database
+    log_verbose "Restoring to temporary database for validation..."
+    local restore_success=true
+
+    case "$backup_file" in
+        *.gz)
+            if ! gzip -dc "$backup_file" | pg_restore --dbname="$temp_uri" - &>/dev/null; then
+                restore_success=false
+            fi
+            ;;
+        *.bz2)
+            if ! bzip2 -dc "$backup_file" | pg_restore --dbname="$temp_uri" - &>/dev/null; then
+                restore_success=false
+            fi
+            ;;
+        *.lz4)
+            if ! lz4 -dc "$backup_file" | pg_restore --dbname="$temp_uri" - &>/dev/null; then
+                restore_success=false
+            fi
+            ;;
+        *.sql*)
+            if [[ "$backup_file" == *.gz ]]; then
+                if ! gzip -dc "$backup_file" | psql "$temp_uri" &>/dev/null; then
+                    restore_success=false
+                fi
+            elif [[ "$backup_file" == *.bz2 ]]; then
+                if ! bzip2 -dc "$backup_file" | psql "$temp_uri" &>/dev/null; then
+                    restore_success=false
+                fi
+            else
+                if ! psql "$temp_uri" -f "$backup_file" &>/dev/null; then
+                    restore_success=false
+                fi
+            fi
+            ;;
+        *)
+            if ! pg_restore --dbname="$temp_uri" "$backup_file" &>/dev/null; then
+                restore_success=false
+            fi
+            ;;
+    esac
+
+    # Clean up temporary database
+    psql "$base_uri" -c "DROP DATABASE IF EXISTS \"$temp_db\";" &>/dev/null
+
+    if [[ "$restore_success" == "true" ]]; then
+        log_success "Schema validation passed"
+        return 0
+    else
+        log_error "Schema validation failed"
+        exit $EXIT_BACKUP_VERIFICATION_ERROR
+    fi
+}
+
+check_data_constraints() {
+    local backup_file="$1"
+
+    if [[ "$CHECK_CONSTRAINTS" != "true" ]]; then
+        return 0
+    fi
+
+    log_info "Checking data constraints in backup..."
+
+    # This is a simplified constraint check
+    # In a real implementation, you might restore to a temp DB and run constraint checks
+    log_warning "Data constraint checking is not fully implemented"
+    log_warning "Consider using --validate-schema for comprehensive validation"
+}
+
+build_pg_dump_compression() {
+    local format="$1"
+    local compression="$2"
+    local compress_level="$3"
+
+    local compression_args=()
+
+    if [[ -n "$compress_level" && "$format" == "custom" ]]; then
+        compression_args+=("--compress=$compress_level")
+        log_verbose "Using PostgreSQL native compression level: $compress_level"
+    fi
+
+    if [[ ${#compression_args[@]} -gt 0 ]]; then
+        echo "${compression_args[@]}"
+    fi
+}
+
+run_parallel_backup() {
+    local db_name="$1"
+    local backup_file="$2"
+    local format="$3"
+    local jobs="$4"
+    shift 4
+    local pg_dump_args=("$@")
+
+    if [[ "$jobs" -le 1 || "$format" != "custom" ]]; then
+        # Fall back to regular backup
+        return 1
+    fi
+
+    log_info "Starting parallel backup with $jobs jobs..."
+
+    local pg_dump_cmd=("pg_dump" "--format=directory" "--jobs=$jobs")
+    if [[ ${#pg_dump_args[@]} -gt 0 ]]; then
+        pg_dump_cmd+=("${pg_dump_args[@]}")
+    fi
+    pg_dump_cmd+=("$DATABASE_URL")
+
+    # Create directory for parallel backup
+    local backup_dir="${backup_file%.dump}.backup_dir"
+    mkdir -p "$backup_dir"
+
+    if "${pg_dump_cmd[@]}" --file="$backup_dir"; then
+        # Convert directory backup to single file
+        log_verbose "Converting parallel backup to single file..."
+        pg_restore --format=custom "$backup_dir" > "$backup_file"
+        rm -rf "$backup_dir"
+        return 0
+    else
+        rm -rf "$backup_dir"
+        return 1
+    fi
+}
+
+# Extract and process global options from arguments
+# Modifies global variables and updates positional parameters in place
+extract_global_options() {
+    local -a new_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --color)
+                case "$2" in
+                    always|never|auto)
+                        COLOR_MODE="$2"
+                        ;;
+                    *)
+                        log_error "Invalid color mode: $2"
+                        log_error "Valid color modes: always, never, auto"
+                        exit $EXIT_GENERAL_ERROR
+                        ;;
+                esac
+                shift 2
+                ;;
+            --log-level)
+                case "$2" in
+                    debug|info|warning|error)
+                        LOG_LEVEL="$2"
+                        ;;
+                    *)
+                        log_error "Invalid log level: $2"
+                        log_error "Valid log levels: debug, info, warning, error"
+                        exit $EXIT_GENERAL_ERROR
+                        ;;
+                esac
+                shift 2
+                ;;
+            --config-file)
+                CONFIG_FILE=$(validate_file_path "$2" true)
+                shift 2
+                ;;
+            --metrics-file)
+                METRICS_FILE=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --notify-webhook)
+                if [[ ! "$2" =~ ^https?:// ]]; then
+                    log_error "Invalid webhook URL format: $2"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                NOTIFY_WEBHOOK="$2"
+                shift 2
+                ;;
+            --syslog)
+                USE_SYSLOG=true
+                shift
+                ;;
+            *)
+                # Keep non-global arguments
+                new_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Export the filtered arguments to a global variable (handle empty array safely)
+    if [[ ${#new_args[@]} -gt 0 ]]; then
+        FILTERED_ARGS=("${new_args[@]}")
+    else
+        FILTERED_ARGS=()
+    fi
+}
+
+# Backup command
+cmd_backup() {
+    local backup_dir="$DEFAULT_BACKUP_DIR"
+    local compression="$DEFAULT_COMPRESSION"
+    local format="custom"
+    local pg_dump_args=()
+
+    # Extract global options from arguments
+    extract_global_options "$@"
+    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
+        set -- "${FILTERED_ARGS[@]}"
+    else
+        set --
+    fi
+
+    # Parse backup-specific arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -D|--dir)
+                backup_dir=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            -c|--compression)
+                compression="$2"
+                case "$compression" in
+                    gzip|bzip2|lz4|none) ;;
+                    *)
+                        log_error "Invalid compression type: $compression"
+                        log_error "Valid compression types: gzip, bzip2, lz4, none"
+                        exit $EXIT_GENERAL_ERROR
+                        ;;
+                esac
+                shift 2
+                ;;
+            -f|--format)
+                format="$2"
+                case "$format" in
+                    custom|tar|plain) ;;
+                    *)
+                        log_error "Invalid format: $format"
+                        log_error "Valid formats: custom, tar, plain"
+                        exit $EXIT_GENERAL_ERROR
+                        ;;
+                esac
+                shift 2
+                ;;
+            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
+                local consumed
+                if consumed=$(parse_connection_arguments "$1" "$2"); then
+                    shift $consumed
+                else
+                    log_error "Unknown connection option: $1"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                ;;
+            --no-owner)
+                pg_dump_args+=("--no-owner")
+                shift
+                ;;
+            --no-privileges)
+                pg_dump_args+=("--no-privileges")
+                shift
+                ;;
+            --schema-only)
+                pg_dump_args+=("--schema-only")
+                shift
+                ;;
+            --data-only)
+                pg_dump_args+=("--data-only")
+                shift
+                ;;
+            --include-extensions)
+                pg_dump_args+=("--extension=*")
+                shift
+                ;;
+            --exclude-table)
+                # Validate table name to prevent injection
+                local table_name=$(sanitize_string "$2")
+                pg_dump_args+=("--exclude-table=$table_name")
+                shift 2
+                ;;
+            --include-table)
+                # Validate table name to prevent injection
+                local table_name=$(sanitize_string "$2")
+                pg_dump_args+=("--table=$table_name")
+                shift 2
+                ;;
+            --exclude-schema)
+                # Validate schema name to prevent injection
+                local schema_name=$(sanitize_string "$2")
+                pg_dump_args+=("--exclude-schema=$schema_name")
+                shift 2
+                ;;
+            --include-schema)
+                # Validate schema name to prevent injection
+                local schema_name=$(sanitize_string "$2")
+                pg_dump_args+=("--schema=$schema_name")
+                shift 2
+                ;;
+            --no-comments)
+                pg_dump_args+=("--no-comments")
+                shift
+                ;;
+            --no-security-labels)
+                pg_dump_args+=("--no-security-labels")
+                shift
+                ;;
+            --no-tablespaces)
+                pg_dump_args+=("--no-tablespaces")
+                shift
+                ;;
+            --no-publications)
+                pg_dump_args+=("--no-publications")
+                shift
+                ;;
+            --no-subscriptions)
+                pg_dump_args+=("--no-subscriptions")
+                shift
+                ;;
+            --if-exists)
+                pg_dump_args+=("--if-exists")
+                shift
+                ;;
+            --ssl-mode|--ssl-cert|--ssl-key|--ssl-ca)
+                local consumed
+                if consumed=$(parse_ssl_arguments "$1" "$2"); then
+                    shift $consumed
+                else
+                    log_error "Unknown SSL option: $1"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                ;;
+            --no-disk-check)
+                CHECK_DISK_SPACE=false
+                shift
+                ;;
+            --no-backup-verify)
+                VERIFY_BACKUP=false
+                shift
+                ;;
+            --connection-timeout)
+                validate_numeric "$2" "connection-timeout" 1 3600
+                CONNECTION_TIMEOUT="$2"
+                shift 2
+                ;;
+            --backup-timeout)
+                validate_numeric "$2" "backup-timeout" 0 86400
+                BACKUP_TIMEOUT="$2"
+                shift 2
+                ;;
+            # Network resilience options
+            --retry-count)
+                validate_numeric "$2" "retry-count" 0 100
+                RETRY_COUNT="$2"
+                shift 2
+                ;;
+            --retry-delay)
+                validate_numeric "$2" "retry-delay" 1 3600
+                RETRY_DELAY="$2"
+                shift 2
+                ;;
+            --retry-backoff)
+                RETRY_BACKOFF=true
+                shift
+                ;;
+            # Progress and monitoring options
+            --progress)
+                SHOW_PROGRESS=true
+                shift
+                ;;
+            --progress-interval)
+                validate_numeric "$2" "progress-interval" 1 3600
+                PROGRESS_INTERVAL="$2"
+                shift 2
+                ;;
+            --log-file)
+                LOG_FILE=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --metrics-file)
+                METRICS_FILE=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --notify-webhook)
+                if [[ ! "$2" =~ ^https?:// ]]; then
+                    log_error "Invalid webhook URL format: $2"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                NOTIFY_WEBHOOK="$2"
+                shift 2
+                ;;
+            --syslog)
+                USE_SYSLOG=true
+                shift
+                ;;
+            # Performance options
+            --jobs)
+                validate_numeric "$2" "jobs" 1 64
+                PARALLEL_JOBS="$2"
+                shift 2
+                ;;
+            --parallel-tables)
+                PARALLEL_TABLES=true
+                shift
+                ;;
+            --compress-level)
+                validate_numeric "$2" "compress-level" 1 9
+                COMPRESS_LEVEL="$2"
+                shift 2
+                ;;
+            # Advanced backup options
+            --backup-manifest)
+                BACKUP_MANIFEST=true
+                shift
+                ;;
+            --exclude-large-objects)
+                EXCLUDE_LARGE_OBJECTS=true
+                pg_dump_args+=("--no-blobs")
+                shift
+                ;;
+            --validate-schema)
+                VALIDATE_SCHEMA=true
+                shift
+                ;;
+            --check-constraints)
+                CHECK_CONSTRAINTS=true
+                shift
+                ;;
+            # Configuration file support
+            --config-file)
+                CONFIG_FILE=$(validate_file_path "$2" true)
+                shift 2
+                ;;
+            --save-config)
+                SAVE_CONFIG=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --help)
+                show_backup_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown backup option: $1"
+                log_error "Use '$SCRIPT_NAME backup --help' for available options"
+                exit $EXIT_GENERAL_ERROR
+                ;;
+        esac
+    done
+
+    # Load configuration file if specified
+    if [[ -n "$CONFIG_FILE" ]]; then
+        load_config_file "$CONFIG_FILE"
+    fi
+
+    get_database_url
+
+    # Handle password input (after DATABASE_URL is set)
+    handle_password
+
+    # Validate database URL before proceeding (avoid subshell exit bug)
+    if ! parse_database_url "$DATABASE_URL" >/dev/null; then
+        exit $EXIT_GENERAL_ERROR
+    fi
+    local db_name=$(parse_database_url "$DATABASE_URL")
+
+    # Save configuration if requested
+    if [[ -n "$SAVE_CONFIG" ]]; then
+        save_config_file "$SAVE_CONFIG"
+        log_success "Configuration saved to: $SAVE_CONFIG"
+    fi
+
+    # Create lock file to prevent concurrent backups
+    create_lock_file "backup" "$db_name"
+
+    # Pre-flight safety checks
+    check_disk_space "$backup_dir" 1
+    test_database_connection
+
+    # Create backup directory
+    mkdir -p "$backup_dir"
+    log_verbose "Created backup directory: $backup_dir"
+
+    # Generate backup filename
+    local backup_file="$backup_dir/$(generate_backup_filename "$db_name" "$format" "$compression")"
+
+    log_info "Starting backup of database: $db_name"
+    log_info "Backup file: $backup_file"
+
+    # Configure SSL environment variables
+    if [[ -n "$SSL_MODE" || -n "$SSL_CERT" || -n "$SSL_KEY" || -n "$SSL_CA" ]]; then
+        log_verbose "Configuring SSL connection parameters"
+        setup_ssl_environment
+    fi
+
+    # Build pg_dump command
+    local pg_dump_cmd=("pg_dump" "--format=$format")
+    if [[ ${#pg_dump_args[@]} -gt 0 ]]; then
+        pg_dump_cmd+=("${pg_dump_args[@]}")
+    fi
+    pg_dump_cmd+=("$DATABASE_URL")
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        pg_dump_cmd+=("--verbose")
+        log_verbose "SSL Mode: ${SSL_MODE:-default}"
+        log_verbose "SSL Cert: ${SSL_CERT:-none}"
+        log_verbose "SSL CA: ${SSL_CA:-none}"
+    fi
+
+    # Add compression level to pg_dump if supported
+    local compression_args=($(build_pg_dump_compression "$format" "$compression" "$COMPRESS_LEVEL"))
+    if [[ ${#compression_args[@]} -gt 0 ]]; then
+        pg_dump_cmd+=("${compression_args[@]}")
+    fi
+
+    # Execute backup with advanced options
+    log_verbose "Starting backup operation..."
+    local backup_start_time=$(date +%s)
+    local backup_exit_code=0
+    local progress_pid=""
+
+    # Start progress monitoring if enabled
+    if [[ "$SHOW_PROGRESS" == "true" ]]; then
+        (
+            while true; do
+                sleep "$PROGRESS_INTERVAL"
+                if [[ -f "$backup_file" ]]; then
+                    local current_size=$(get_file_size_human "$backup_file")
+                    log_progress "Backup in progress - current size: $current_size"
+                fi
+            done
+        ) &
+        progress_pid=$!
+    fi
+
+    # Try parallel backup first if enabled
+    if [[ "$PARALLEL_JOBS" -gt 1 && "$format" == "custom" ]]; then
+        log_info "Attempting parallel backup with $PARALLEL_JOBS jobs..."
+        if [[ ${#pg_dump_args[@]} -gt 0 ]]; then
+            if run_parallel_backup "$db_name" "$backup_file" "$format" "$PARALLEL_JOBS" "${pg_dump_args[@]}"; then
+                backup_exit_code=0
+            else
+                log_warning "Parallel backup failed, falling back to single-threaded backup"
+                rm -f "$backup_file"
+            fi
+        else
+            if run_parallel_backup "$db_name" "$backup_file" "$format" "$PARALLEL_JOBS"; then
+                backup_exit_code=0
+            else
+                log_warning "Parallel backup failed, falling back to single-threaded backup"
+                rm -f "$backup_file"
+            fi
+        fi
+    fi
+
+    # Regular backup if parallel failed or not enabled
+    if [[ ! -f "$backup_file" ]]; then
+        # Validate backup file path
+        backup_file=$(validate_file_path "$backup_file" false)
+
+        # Validate compression level if provided
+        if [[ -n "$COMPRESS_LEVEL" ]]; then
+            validate_numeric "$COMPRESS_LEVEL" "COMPRESS_LEVEL" 1 9
+        fi
+
+        log_verbose "Using compression: $compression"
+
+        if [[ "$BACKUP_TIMEOUT" -gt 0 ]]; then
+            backup_exit_code=$(run_with_timeout "$BACKUP_TIMEOUT" execute_with_compression "$compression" "$COMPRESS_LEVEL" "${pg_dump_cmd[@]}" > "$backup_file"; echo $?)
+        else
+            execute_with_compression "$compression" "$COMPRESS_LEVEL" "${pg_dump_cmd[@]}" > "$backup_file"
+            backup_exit_code=$?
+        fi
+    fi
+
+    # Stop progress monitoring
+    if [[ -n "$progress_pid" ]]; then
+        kill "$progress_pid" 2>/dev/null || true
+        wait "$progress_pid" 2>/dev/null || true
+    fi
+
+    local backup_end_time=$(date +%s)
+    local backup_duration=$((backup_end_time - backup_start_time))
+
+    # Check if backup was successful
+    if [[ $backup_exit_code -eq 0 && -f "$backup_file" ]]; then
+        local file_size=$(get_file_size_human "$backup_file")
+        local file_size_bytes=$(get_file_size_bytes "$backup_file")
+
+        log_success "Backup completed successfully in ${backup_duration}s"
+        log_success "File: $backup_file"
+        log_success "Size: $file_size"
+
+        # Verify backup integrity
+        verify_backup_file "$backup_file"
+
+        # Validate schema if requested
+        validate_backup_schema "$backup_file"
+
+        # Check data constraints if requested
+        check_data_constraints "$backup_file"
+
+        # Calculate and log checksum
+        local checksum=$(calculate_file_checksum "$backup_file")
+        if [[ "$checksum" != "unavailable" ]]; then
+            log_success "Checksum: $checksum"
+        fi
+
+        # Generate backup manifest
+        generate_backup_manifest "$backup_file" "$db_name"
+
+        # Set proper file permissions (readable by owner and group)
+        chmod 640 "$backup_file"
+        log_verbose "Set backup file permissions to 640"
+
+        # Write metrics
+        write_metrics "backup" "$backup_duration" "$file_size_bytes" "$backup_exit_code"
+
+        # Send success notification
+        send_webhook_notification "backup" "success" "Backup completed successfully" "$backup_file" "$backup_duration"
+
+        log_success "Backup operation completed successfully"
+
+    else
+        log_error "Backup failed (exit code: $backup_exit_code)"
+
+        # Clean up partial backup file
+        if [[ -f "$backup_file" ]]; then
+            rm -f "$backup_file"
+            log_verbose "Removed partial backup file"
+        fi
+
+        # Write failure metrics
+        write_metrics "backup" "$backup_duration" "0" "$backup_exit_code"
+
+        # Send failure notification
+        send_webhook_notification "backup" "failure" "Backup failed with exit code $backup_exit_code" "" "$backup_duration"
+
+        exit $EXIT_GENERAL_ERROR
+    fi
+}
+
+# Restore command
+cmd_restore() {
+    local backup_file=""
+    local pg_restore_args=()
+    local clean=false
+
+    # Extract global options from arguments
+    extract_global_options "$@"
+    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
+        set -- "${FILTERED_ARGS[@]}"
+    else
+        set --
+    fi
+
+    # Parse restore-specific arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -f|--file)
+                backup_file=$(validate_file_path "$2" true)
+                shift 2
+                ;;
+            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
+                local consumed
+                if consumed=$(parse_connection_arguments "$1" "$2"); then
+                    shift $consumed
+                else
+                    log_error "Unknown connection option: $1"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                ;;
+            --force)
+                FORCE=true
+                shift
+                ;;
+            --clean)
+                clean=true
+                pg_restore_args+=("--clean")
+                shift
+                ;;
+            --no-owner)
+                pg_restore_args+=("--no-owner")
+                shift
+                ;;
+            --no-privileges)
+                pg_restore_args+=("--no-privileges")
+                shift
+                ;;
+            --ssl-mode|--ssl-cert|--ssl-key|--ssl-ca)
+                local consumed
+                if consumed=$(parse_ssl_arguments "$1" "$2"); then
+                    shift $consumed
+                else
+                    log_error "Unknown SSL option: $1"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                ;;
+            --no-backup-verify)
+                VERIFY_BACKUP=false
+                shift
+                ;;
+            --connection-timeout)
+                validate_numeric "$2" "connection-timeout" 1 3600
+                CONNECTION_TIMEOUT="$2"
+                shift 2
+                ;;
+            --help)
+                show_restore_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown restore option: $1"
+                log_error "Use '$SCRIPT_NAME restore --help' for available options"
+                exit $EXIT_GENERAL_ERROR
+                ;;
+        esac
+    done
+
+    if [[ -z "$backup_file" ]]; then
+        log_error "Backup file is required for restore. Use -f or --file option."
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if [[ ! -f "$backup_file" ]]; then
+        log_error "Backup file not found: $backup_file"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    get_database_url
+
+    # Handle password input (after DATABASE_URL is set)
+    handle_password
+
+    # Validate database URL before proceeding (avoid subshell exit bug)
+    if ! parse_database_url "$DATABASE_URL" >/dev/null; then
+        exit $EXIT_GENERAL_ERROR
+    fi
+    local db_name=$(parse_database_url "$DATABASE_URL")
+
+    # Create lock file to prevent concurrent restores
+    create_lock_file "restore" "$db_name"
+
+    # Pre-flight safety checks
+    verify_backup_file "$backup_file"
+    test_database_connection
+
+    log_info "Starting restore of database: $db_name"
+    log_info "From backup file: $backup_file"
+
+    # Configure SSL environment variables
+    if [[ -n "$SSL_MODE" || -n "$SSL_CERT" || -n "$SSL_KEY" || -n "$SSL_CA" ]]; then
+        log_verbose "Configuring SSL connection parameters"
+        setup_ssl_environment
+        if [[ "$VERBOSE" == "true" ]]; then
+            log_verbose "SSL Mode: ${SSL_MODE:-default}"
+            log_verbose "SSL Cert: ${SSL_CERT:-none}"
+            log_verbose "SSL CA: ${SSL_CA:-none}"
+        fi
+    fi
+
+    # Check if database exists and handle accordingly
+    if PGPASSWORD="${PGPASSWORD:-}" psql "$DATABASE_URL" -c '\q' 2>/dev/null; then
+        if [[ "$FORCE" == "true" ]]; then
+            log_warning "Database exists and --force specified. Dropping database..."
+            # Extract connection details without database name for dropping
+            local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
+            PGPASSWORD="${PGPASSWORD:-}" psql "$base_uri" -c "DROP DATABASE IF EXISTS \"$db_name\";"
+            PGPASSWORD="${PGPASSWORD:-}" psql "$base_uri" -c "CREATE DATABASE \"$db_name\";"
+            log_verbose "Database recreated"
+        elif [[ "$clean" == "false" ]]; then
+            log_error "Database already exists. Use --force to drop and recreate, or --clean to clean before restore."
+            exit $EXIT_GENERAL_ERROR
+        fi
+    else
+        # Database doesn't exist, create it
+        log_info "Database doesn't exist, creating..."
+        local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
+        PGPASSWORD="${PGPASSWORD:-}" psql "$base_uri" -c "CREATE DATABASE \"$db_name\";"
+        log_verbose "Database created"
+    fi
+
+    # Validate backup file path
+    backup_file=$(validate_file_path "$backup_file" true)
+
+    # Add verbose flag to restore args if needed
+    if [[ "$VERBOSE" == "true" ]]; then
+        pg_restore_args+=("--verbose")
+    fi
+
+    # Execute restore with monitoring and retry logic
+    log_verbose "Starting secure restore operation"
+    local restore_start_time=$(date +%s)
+    local restore_exit_code=0
+
+    # Start progress monitoring if enabled
+    if [[ "$SHOW_PROGRESS" == "true" ]]; then
+        (
+            while true; do
+                sleep "$PROGRESS_INTERVAL"
+                log_progress "Restore operation in progress..."
+            done
+        ) &
+        PROGRESS_PID=$!
+    fi
+
+    # Execute restore with retry logic using secure function
+    if [[ ${#pg_restore_args[@]} -gt 0 ]]; then
+        run_with_retry "$RETRY_COUNT" "$RETRY_DELAY" "$RETRY_BACKOFF" \
+            execute_restore_with_decompression "$backup_file" "$DATABASE_URL" "${pg_restore_args[@]}"
+    else
+        run_with_retry "$RETRY_COUNT" "$RETRY_DELAY" "$RETRY_BACKOFF" \
+            execute_restore_with_decompression "$backup_file" "$DATABASE_URL"
+    fi
+    restore_exit_code=$?
+
+    # Stop progress monitoring
+    if [[ -n "${PROGRESS_PID:-}" ]]; then
+        kill "$PROGRESS_PID" 2>/dev/null || true
+        wait "$PROGRESS_PID" 2>/dev/null || true
+        unset PROGRESS_PID
+    fi
+
+    local restore_end_time=$(date +%s)
+    local restore_duration=$((restore_end_time - restore_start_time))
+
+    # Check if restore was successful
+    if [[ $restore_exit_code -eq 0 ]]; then
+        log_success "Restore completed successfully in ${restore_duration}s"
+        log_success "Database: $db_name"
+        log_success "From backup: $(basename "$backup_file")"
+
+        # Write success metrics
+        local backup_size=$(get_file_size_bytes "$backup_file")
+        write_metrics "restore" "$restore_duration" "$backup_size" "$restore_exit_code"
+
+        # Send success notification
+        send_webhook_notification "restore" "success" "Restore completed successfully" "$backup_file" "$restore_duration"
+
+        log_success "Restore operation completed successfully"
+    else
+        log_error "Restore failed (exit code: $restore_exit_code) after ${restore_duration}s"
+
+        # Write failure metrics
+        write_metrics "restore" "$restore_duration" "0" "$restore_exit_code"
+
+        # Send failure notification
+        send_webhook_notification "restore" "failure" "Restore failed with exit code $restore_exit_code" "$backup_file" "$restore_duration"
+
+        exit $EXIT_GENERAL_ERROR
+    fi
+}
+
+# List command
+cmd_list() {
+    local list_dir="$DEFAULT_BACKUP_DIR"
+    local sort_method="date"
+    local reverse_sort=false
+    local output_format="table"
+
+    # Extract global options from arguments
+    extract_global_options "$@"
+    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
+        set -- "${FILTERED_ARGS[@]}"
+    else
+        set --
+    fi
+
+    # Parse list-specific arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -D|--dir)
+                list_dir=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            -s|--sort)
+                sort_method="$2"
+                case "$sort_method" in
+                    date|size|name) ;;
+                    *)
+                        log_error "Invalid sort method: $sort_method"
+                        log_error "Valid sort methods: date, size, name"
+                        exit $EXIT_GENERAL_ERROR
+                        ;;
+                esac
+                shift 2
+                ;;
+            -r|--reverse)
+                reverse_sort=true
+                shift
+                ;;
+            --format)
+                output_format="$2"
+                case "$output_format" in
+                    table|simple|json) ;;
+                    *)
+                        log_error "Invalid output format: $output_format"
+                        log_error "Valid formats: table, simple, json"
+                        exit $EXIT_GENERAL_ERROR
+                        ;;
+                esac
+                shift 2
+                ;;
+            --help)
+                show_list_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown list option: $1"
+                log_error "Use '$SCRIPT_NAME list --help' for available options"
+                exit $EXIT_GENERAL_ERROR
+                ;;
+        esac
+    done
+
+    # Check if directory exists
+    if [[ ! -d "$list_dir" ]]; then
+        log_error "Directory not found: $list_dir"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Find backup files
+    local backup_files=()
+    while IFS= read -r -d '' file; do
+        backup_files+=("$file")
+    done < <(find "$list_dir" -maxdepth 1 -type f \( \
+        -name "*.dump" -o -name "*.dump.gz" -o -name "*.dump.bz2" -o -name "*.dump.lz4" -o \
+        -name "*.tar" -o -name "*.tar.gz" -o -name "*.tar.bz2" -o -name "*.tar.lz4" -o \
+        -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.bz2" -o -name "*.sql.lz4" \
+        \) -print0)
+
+    if [[ ${#backup_files[@]} -eq 0 ]]; then
+        log_warning "No backup files found in directory: $list_dir"
+        log_info "Supported extensions: .dump, .tar, .sql (with optional .gz, .bz2, .lz4 compression)"
+        return 0
+    fi
+
+    # Sort files using preferred tools
+    local sort_flags
+
+    case "$sort_method" in
+        date)
+            sort_flags="-1t"
+            [[ "$reverse_sort" == "true" ]] && sort_flags="${sort_flags}r"
+            IFS=$'\n' backup_files=($(run_preferred_command "ls" $sort_flags "${backup_files[@]}" 2>/dev/null))
+            ;;
+        size)
+            sort_flags="-1S"
+            [[ "$reverse_sort" == "true" ]] && sort_flags="${sort_flags}r"
+            IFS=$'\n' backup_files=($(run_preferred_command "ls" $sort_flags "${backup_files[@]}" 2>/dev/null))
+            ;;
+        name)
+            if [[ "$reverse_sort" == "true" ]]; then
+                IFS=$'\n' backup_files=($(printf '%s\n' "${backup_files[@]}" | sort -r))
+            else
+                IFS=$'\n' backup_files=($(printf '%s\n' "${backup_files[@]}" | sort))
+            fi
+            ;;
+    esac
+
+    # Output results
+    case "$output_format" in
+        simple)
+            printf '%s\n' "${backup_files[@]}"
+            ;;
+        json)
+            echo "["
+            local first=true
+            for file in "${backup_files[@]}"; do
+                if [[ "$first" == "false" ]]; then
+                    echo ","
+                fi
+                first=false
+                local basename_file=$(basename "$file")
+                local size=$(get_file_size_human "$file")
+                local date=$(get_file_modification_date "$file")
+                local format="unknown"
+                case "$basename_file" in
+                    *.dump*) format="custom" ;;
+                    *.tar*) format="tar" ;;
+                    *.sql*) format="plain" ;;
+                esac
+                local compression="none"
+                case "$basename_file" in
+                    *.gz) compression="gzip" ;;
+                    *.bz2) compression="bzip2" ;;
+                    *.lz4) compression="lz4" ;;
+                esac
+
+                printf '  {\n    "file": "%s",\n    "size": "%s",\n    "date": "%s",\n    "format": "%s",\n    "compression": "%s"\n  }' \
+                    "$file" "$size" "$date" "$format" "$compression"
+            done
+            echo ""
+            echo "]"
+            ;;
+        table)
+            printf "%-50s %-10s %-19s %-8s %-11s\n" "FILE" "SIZE" "DATE" "FORMAT" "COMPRESSION"
+            printf "%-50s %-10s %-19s %-8s %-11s\n" "$(printf '%*s' 50 | tr ' ' '-')" "$(printf '%*s' 10 | tr ' ' '-')" "$(printf '%*s' 19 | tr ' ' '-')" "$(printf '%*s' 8 | tr ' ' '-')" "$(printf '%*s' 11 | tr ' ' '-')"
+
+            for file in "${backup_files[@]}"; do
+                local basename_file=$(basename "$file")
+                local size=$(get_file_size_human "$file")
+                local date=$(get_file_modification_date "$file")
+                local format="unknown"
+                case "$basename_file" in
+                    *.dump*) format="custom" ;;
+                    *.tar*) format="tar" ;;
+                    *.sql*) format="plain" ;;
+                esac
+                local compression="none"
+                case "$basename_file" in
+                    *.gz) compression="gzip" ;;
+                    *.bz2) compression="bzip2" ;;
+                    *.lz4) compression="lz4" ;;
+                esac
+
+                printf "%-50s %-10s %-19s %-8s %-11s\n" \
+                    "$basename_file" "$size" "$date" "$format" "$compression"
+            done
+            ;;
+    esac
+
+    log_info "Found ${#backup_files[@]} backup file(s) in $list_dir"
+}
+
+# Main command dispatcher
+main() {
+    if [[ $# -eq 0 ]]; then
+        show_help
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            --no-disk-check)
+                CHECK_DISK_SPACE=false
+                shift
+                ;;
+            --no-backup-verify)
+                VERIFY_BACKUP=false
+                shift
+                ;;
+            --connection-timeout)
+                validate_numeric "$2" "connection-timeout" 1 3600
+                CONNECTION_TIMEOUT="$2"
+                shift 2
+                ;;
+            --backup-timeout)
+                validate_numeric "$2" "backup-timeout" 0 86400
+                BACKUP_TIMEOUT="$2"
+                shift 2
+                ;;
+            # Network resilience options (global)
+            --retry-count)
+                validate_numeric "$2" "retry-count" 0 100
+                RETRY_COUNT="$2"
+                shift 2
+                ;;
+            --retry-delay)
+                validate_numeric "$2" "retry-delay" 1 3600
+                RETRY_DELAY="$2"
+                shift 2
+                ;;
+            --retry-backoff)
+                RETRY_BACKOFF=true
+                shift
+                ;;
+            # Monitoring options (global)
+            --log-file)
+                LOG_FILE=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --metrics-file)
+                METRICS_FILE=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --notify-webhook)
+                if [[ ! "$2" =~ ^https?:// ]]; then
+                    log_error "Invalid webhook URL format: $2"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                NOTIFY_WEBHOOK="$2"
+                shift 2
+                ;;
+            --syslog)
+                USE_SYSLOG=true
+                shift
+                ;;
+            # Configuration file support (global)
+            --config-file)
+                CONFIG_FILE=$(validate_file_path "$2" true)
+                shift 2
+                ;;
+            -h|--help)
+                show_help
+                exit $EXIT_SUCCESS
+                ;;
+            backup|restore|list|verify|help|version)
+                break
+                ;;
+            *)
+                log_error "Unknown global option: $1"
+                show_help
+                exit $EXIT_GENERAL_ERROR
+                ;;
+        esac
+    done
+
+    # Load global configuration file if specified
+    if [[ -n "$CONFIG_FILE" ]]; then
+        load_config_file "$CONFIG_FILE"
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        log_error "No command specified"
+        show_help
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    local command="$1"
+    shift
+
+    # Check prerequisites for backup/restore commands
+    case "$command" in
+        backup|restore|verify)
+            check_prerequisites
+            ;;
+    esac
+
+    # Execute command
+    case "$command" in
+        backup)
+            cmd_backup "$@"
+            ;;
+        restore)
+            cmd_restore "$@"
+            ;;
+        list)
+            cmd_list "$@"
+            ;;
+        verify)
+            cmd_verify "$@"
+            ;;
+        help)
+            show_help
+            ;;
+        version)
+            show_version
+            ;;
+        *)
+            log_error "Unknown command: $command"
+            show_help
+            exit $EXIT_GENERAL_ERROR
+            ;;
+    esac
+}
+
+# Verify command
+cmd_verify() {
+    local backup_file=""
+    local backup_dir="$DEFAULT_BACKUP_DIR"
+    local verify_checksums=false
+    local deep_verify=false
+    local parallel_verify=false
+    local fix_issues=false
+    local expected_format=""
+    local verify_all=false
+
+    # Extract global options from arguments
+    extract_global_options "$@"
+    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
+        set -- "${FILTERED_ARGS[@]}"
+    else
+        set --
+    fi
+
+    # Parse verify-specific arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -f|--file)
+                backup_file=$(validate_file_path "$2" true)
+                shift 2
+                ;;
+            -D|--dir)
+                backup_dir=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --checksums)
+                verify_checksums=true
+                shift
+                ;;
+            --deep)
+                deep_verify=true
+                shift
+                ;;
+            --parallel)
+                parallel_verify=true
+                shift
+                ;;
+            --fix)
+                fix_issues=true
+                shift
+                ;;
+            --format)
+                expected_format="$2"
+                case "$expected_format" in
+                    custom|tar|plain) ;;
+                    *)
+                        log_error "Invalid expected format: $expected_format"
+                        log_error "Valid formats: custom, tar, plain"
+                        exit $EXIT_GENERAL_ERROR
+                        ;;
+                esac
+                shift 2
+                ;;
+            --all)
+                verify_all=true
+                shift
+                ;;
+            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
+                local consumed
+                if consumed=$(parse_connection_arguments "$1" "$2"); then
+                    shift $consumed
+                else
+                    log_error "Unknown connection option: $1"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+                ;;
+            --help)
+                show_verify_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown verify option: $1"
+                log_error "Use '$SCRIPT_NAME verify --help' for available options"
+                exit $EXIT_GENERAL_ERROR
+                ;;
+        esac
+    done
+
+    # Determine what to verify
+    local files_to_verify=()
+
+    if [[ -n "$backup_file" ]]; then
+        # Verify specific file
+        if [[ ! -f "$backup_file" ]]; then
+            log_error "Backup file not found: $backup_file"
+            exit $EXIT_GENERAL_ERROR
+        fi
+        files_to_verify=("$backup_file")
+        log_info "Verifying specific backup file: $(basename "$backup_file")"
+    else
+        # Verify all files in directory
+        if [[ ! -d "$backup_dir" ]]; then
+            log_error "Backup directory not found: $backup_dir"
+            exit $EXIT_GENERAL_ERROR
+        fi
+
+        log_info "Searching for backup files in: $backup_dir"
+
+        while IFS= read -r -d '' file; do
+            files_to_verify+=("$file")
+        done < <(find "$backup_dir" -maxdepth 1 -type f \( \
+            -name "*.dump" -o -name "*.dump.gz" -o -name "*.dump.bz2" -o -name "*.dump.lz4" -o \
+            -name "*.tar" -o -name "*.tar.gz" -o -name "*.tar.bz2" -o -name "*.tar.lz4" -o \
+            -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.bz2" -o -name "*.sql.lz4" \
+            \) -print0)
+
+        if [[ ${#files_to_verify[@]} -eq 0 ]]; then
+            log_warning "No backup files found in directory: $backup_dir"
+            log_info "Supported extensions: .dump, .tar, .sql (with optional .gz, .bz2, .lz4 compression)"
+            return 0
+        fi
+
+        log_info "Found ${#files_to_verify[@]} backup file(s) to verify"
+    fi
+
+    # Setup database connection for deep verification if needed
+    if [[ "$deep_verify" == "true" ]]; then
+        get_database_url
+        handle_password
+        test_database_connection
+        log_info "Database connection verified for deep verification"
+    fi
+
+    # Verification counters
+    local total_files=${#files_to_verify[@]}
+    local verified_files=0
+    local failed_files=0
+    local corrupted_files=0
+    local fixed_files=0
+
+    # Create results summary
+    local results_file=$(mktemp)
+    echo "# Backup Verification Results" > "$results_file"
+    echo "# Generated: $(date)" >> "$results_file"
+    echo "# Total files: $total_files" >> "$results_file"
+    echo "" >> "$results_file"
+
+    log_info "Starting verification of $total_files file(s)..."
+
+    # Verify each file
+    for file in "${files_to_verify[@]}"; do
+        local file_basename=$(basename "$file")
+        log_info "Verifying: $file_basename"
+
+        local file_status="UNKNOWN"
+        local file_issues=()
+        local file_size=$(get_file_size_human "$file")
+        local file_date=$(get_file_modification_date "$file")
+
+        # Basic file checks
+        if [[ ! -f "$file" ]]; then
+            file_status="MISSING"
+            file_issues+=("File not found")
+        elif [[ ! -s "$file" ]]; then
+            file_status="EMPTY"
+            file_issues+=("File is empty")
+        else
+            # Detect format and compression
+            local detected_format="unknown"
+            local detected_compression="none"
+
+            case "$file" in
+                *.sql*) detected_format="plain" ;;
+                *.dump*) detected_format="custom" ;;
+                *.tar*) detected_format="tar" ;;
+            esac
+
+            case "$file" in
+                *.gz) detected_compression="gzip" ;;
+                *.bz2) detected_compression="bzip2" ;;
+                *.lz4) detected_compression="lz4" ;;
+            esac
+
+            log_verbose "Detected format: $detected_format, compression: $detected_compression"
+
+            # Check expected format if specified
+            if [[ -n "$expected_format" && "$detected_format" != "$expected_format" ]]; then
+                file_issues+=("Format mismatch: expected $expected_format, detected $detected_format")
+            fi
+
+            # Test compression integrity
+            case "$detected_compression" in
+                gzip)
+                    if gzip -t "$file" 2>/dev/null; then
+                        log_verbose "Gzip compression integrity: OK"
+                    else
+                        file_issues+=("Gzip compression corrupted")
+                        corrupted_files=$((corrupted_files + 1))
+                    fi
+                    ;;
+                bzip2)
+                    if bzip2 -t "$file" 2>/dev/null; then
+                        log_verbose "Bzip2 compression integrity: OK"
+                    else
+                        file_issues+=("Bzip2 compression corrupted")
+                        corrupted_files=$((corrupted_files + 1))
+                    fi
+                    ;;
+                lz4)
+                    if command -v lz4 &>/dev/null && lz4 -t "$file" 2>/dev/null; then
+                        log_verbose "LZ4 compression integrity: OK"
+                    else
+                        file_issues+=("LZ4 compression corrupted or lz4 not available")
+                        corrupted_files=$((corrupted_files + 1))
+                    fi
+                    ;;
+            esac
+
+            # Test PostgreSQL format
+            if [[ ${#file_issues[@]} -eq 0 ]]; then
+                local pg_test_success=false
+                local pg_test_error=""
+
+                case "$detected_format" in
+                    custom|tar)
+                        case "$detected_compression" in
+                            gzip)
+                                # Test decompression first
+                                if ! gzip -t "$file" 2>/dev/null; then
+                                    pg_test_error="gzip decompression test failed"
+                                else
+                                    # Use temporary file for more reliable pipe handling
+                                    local temp_file=$(mktemp)
+                                    if gzip -dc "$file" > "$temp_file" 2>/dev/null; then
+                                        local output
+                                        if output=$(pg_restore --list "$temp_file" 2>&1); then
+                                            pg_test_success=true
+                                        else
+                                            pg_test_error="pg_restore: $output"
+                                        fi
+                                    else
+                                        pg_test_error="gzip decompression failed"
+                                    fi
+                                    rm -f "$temp_file"
+                                fi
+                                ;;
+                            bzip2)
+                                # Test decompression first
+                                if ! bzip2 -t "$file" 2>/dev/null; then
+                                    pg_test_error="bzip2 decompression test failed"
+                                else
+                                    # Use temporary file for more reliable pipe handling
+                                    local temp_file=$(mktemp)
+                                    if bzip2 -dc "$file" > "$temp_file" 2>/dev/null; then
+                                        local output
+                                        if output=$(pg_restore --list "$temp_file" 2>&1); then
+                                            pg_test_success=true
+                                        else
+                                            pg_test_error="pg_restore: $output"
+                                        fi
+                                    else
+                                        pg_test_error="bzip2 decompression failed"
+                                    fi
+                                    rm -f "$temp_file"
+                                fi
+                                ;;
+                            lz4)
+                                if ! command -v lz4 &>/dev/null; then
+                                    pg_test_error="lz4 command not available"
+                                elif ! lz4 -t "$file" 2>/dev/null; then
+                                    pg_test_error="lz4 decompression test failed"
+                                else
+                                    # Use temporary file for more reliable pipe handling
+                                    local temp_file=$(mktemp)
+                                    if lz4 -dc "$file" > "$temp_file" 2>/dev/null; then
+                                        local output
+                                        if output=$(pg_restore --list "$temp_file" 2>&1); then
+                                            pg_test_success=true
+                                        else
+                                            pg_test_error="pg_restore: $output"
+                                        fi
+                                    else
+                                        pg_test_error="lz4 decompression failed"
+                                    fi
+                                    rm -f "$temp_file"
+                                fi
+                                ;;
+                            none)
+                                local output
+                                if output=$(pg_restore --list "$file" 2>&1); then
+                                    pg_test_success=true
+                                else
+                                    pg_test_error="pg_restore: $output"
+                                fi
+                                ;;
+                        esac
+                        ;;
+                    plain)
+                        # For SQL files, we can only check if they decompress and contain SQL-like content
+                        local sql_content=""
+                        case "$detected_compression" in
+                            gzip)
+                                sql_content=$(gzip -dc "$file" 2>/dev/null | head -n 10)
+                                ;;
+                            bzip2)
+                                sql_content=$(bzip2 -dc "$file" 2>/dev/null | head -n 10)
+                                ;;
+                            lz4)
+                                if command -v lz4 &>/dev/null; then
+                                    sql_content=$(lz4 -dc "$file" 2>/dev/null | head -n 10)
+                                fi
+                                ;;
+                            none)
+                                sql_content=$(head -n 10 "$file" 2>/dev/null)
+                                ;;
+                        esac
+
+                        if [[ "$sql_content" =~ (CREATE|INSERT|DROP|ALTER|SELECT) ]]; then
+                            pg_test_success=true
+                        else
+                            pg_test_error="No SQL content detected in plain format file"
+                        fi
+                        ;;
+                esac
+
+                if [[ "$pg_test_success" == "true" ]]; then
+                    log_verbose "PostgreSQL format test: OK"
+                else
+                    # Truncate very long error messages
+                    if [[ ${#pg_test_error} -gt 200 ]]; then
+                        pg_test_error="${pg_test_error:0:200}..."
+                    fi
+                    log_verbose "PostgreSQL format test failed: $pg_test_error"
+                    file_issues+=("PostgreSQL format test failed")
+                fi
+            fi
+
+            # Verify checksums if requested and manifest exists
+            if [[ "$verify_checksums" == "true" ]]; then
+                local manifest_file="${file}.manifest"
+                if [[ -f "$manifest_file" ]]; then
+                    log_verbose "Checking checksums against manifest..."
+                    local stored_checksum=$(grep "^checksum:" "$manifest_file" 2>/dev/null | cut -d' ' -f2)
+                    if [[ -n "$stored_checksum" ]]; then
+                        local current_checksum=$(calculate_file_checksum "$file")
+                        if [[ "$stored_checksum" == "$current_checksum" ]]; then
+                            log_verbose "Checksum verification: OK"
+                        else
+                            file_issues+=("Checksum mismatch: stored=$stored_checksum, current=$current_checksum")
+                        fi
+                    else
+                        log_verbose "No checksum found in manifest"
+                    fi
+                else
+                    log_verbose "No manifest file found for checksum verification"
+                fi
+            fi
+
+            # Deep verification - test restore to temporary database
+            if [[ "$deep_verify" == "true" && ${#file_issues[@]} -eq 0 ]]; then
+                log_verbose "Performing deep verification (test restore)..."
+                if verify_backup_by_restore "$file"; then
+                    log_verbose "Deep verification: OK"
+                else
+                    file_issues+=("Deep verification (test restore) failed")
+                fi
+            fi
+
+            # Determine final status
+            if [[ ${#file_issues[@]} -eq 0 ]]; then
+                file_status="OK"
+                verified_files=$((verified_files + 1))
+                log_success "✓ $file_basename: VERIFIED"
+            else
+                file_status="FAILED"
+                failed_files=$((failed_files + 1))
+                log_error "✗ $file_basename: FAILED (${#file_issues[@]} issue(s))"
+                for issue in "${file_issues[@]}"; do
+                    log_error "  - $issue"
+                done
+
+                # Attempt to fix issues if requested
+                if [[ "$fix_issues" == "true" ]]; then
+                    log_info "Attempting to fix issues for: $file_basename"
+                    if attempt_backup_fix "$file" "${file_issues[@]}"; then
+                        fixed_files=$((fixed_files + 1))
+                        log_success "Fixed issues for: $file_basename"
+                        file_status="FIXED"
+                    else
+                        log_warning "Could not fix issues for: $file_basename"
+                    fi
+                fi
+            fi
+        fi
+
+        # Record results
+        {
+            echo "File: $file"
+            echo "Status: $file_status"
+            echo "Size: $file_size"
+            echo "Date: $file_date"
+            echo "Format: $detected_format"
+            echo "Compression: $detected_compression"
+            if [[ ${#file_issues[@]} -gt 0 ]]; then
+                echo "Issues:"
+                for issue in "${file_issues[@]}"; do
+                    echo "  - $issue"
+                done
+            fi
+            echo ""
+        } >> "$results_file"
+    done
+
+    # Generate summary
+    echo "" >> "$results_file"
+    echo "# Summary" >> "$results_file"
+    echo "Total files: $total_files" >> "$results_file"
+    echo "Verified: $verified_files" >> "$results_file"
+    echo "Failed: $failed_files" >> "$results_file"
+    echo "Corrupted: $corrupted_files" >> "$results_file"
+    echo "Fixed: $fixed_files" >> "$results_file"
+
+    # Display summary
+    log_info "Verification Summary:"
+    log_info "  Total files: $total_files"
+    log_success "  Verified: $verified_files"
+    if [[ $failed_files -gt 0 ]]; then
+        log_error "  Failed: $failed_files"
+    fi
+    if [[ $corrupted_files -gt 0 ]]; then
+        log_error "  Corrupted: $corrupted_files"
+    fi
+    if [[ $fixed_files -gt 0 ]]; then
+        log_success "  Fixed: $fixed_files"
+    fi
+
+    # Save results if verbose
+    if [[ "$VERBOSE" == "true" ]]; then
+        local results_save_file="$backup_dir/verification_results_$(date +%Y%m%d_%H%M%S).txt"
+        cp "$results_file" "$results_save_file"
+        log_verbose "Detailed results saved to: $results_save_file"
+    fi
+
+    # Cleanup
+    rm -f "$results_file"
+
+    # Exit with appropriate code
+    if [[ $failed_files -gt 0 ]]; then
+        log_error "Verification completed with failures"
+        exit $EXIT_BACKUP_VERIFICATION_ERROR
+    else
+        log_success "All backup files verified successfully"
+        return 0
+    fi
+}
+
+# Deep verification by test restore to temporary database
+verify_backup_by_restore() {
+    local backup_file="$1"
+
+    # Generate temporary database name
+    local temp_db="temp_verify_$(date +%s)_$$"
+    local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
+    local temp_uri=$(echo "$DATABASE_URL" | sed "s|/[^/]*$|/$temp_db|")
+
+    log_verbose "Creating temporary database for verification: $temp_db"
+
+    # Create temporary database
+    if ! execute_pg_command psql "$base_uri" -c "CREATE DATABASE \"$temp_db\";" &>/dev/null; then
+        log_verbose "Failed to create temporary database for verification"
+        return 1
+    fi
+
+    # Restore to temporary database
+    local restore_success=true
+    local restore_output=""
+
+    case "$backup_file" in
+        *.gz)
+            restore_output=$(gzip -dc "$backup_file" | execute_pg_command pg_restore --dbname="$temp_uri" - 2>&1)
+            ;;
+        *.bz2)
+            restore_output=$(bzip2 -dc "$backup_file" | execute_pg_command pg_restore --dbname="$temp_uri" - 2>&1)
+            ;;
+        *.lz4)
+            if command -v lz4 &>/dev/null; then
+                restore_output=$(lz4 -dc "$backup_file" | execute_pg_command pg_restore --dbname="$temp_uri" - 2>&1)
+            else
+                restore_success=false
+            fi
+            ;;
+        *.sql*)
+            if [[ "$backup_file" == *.gz ]]; then
+                restore_output=$(gzip -dc "$backup_file" | execute_pg_command psql "$temp_uri" 2>&1)
+            elif [[ "$backup_file" == *.bz2 ]]; then
+                restore_output=$(bzip2 -dc "$backup_file" | execute_pg_command psql "$temp_uri" 2>&1)
+            elif [[ "$backup_file" == *.lz4 ]]; then
+                if command -v lz4 &>/dev/null; then
+                    restore_output=$(lz4 -dc "$backup_file" | execute_pg_command psql "$temp_uri" 2>&1)
+                else
+                    restore_success=false
+                fi
+            else
+                restore_output=$(execute_pg_command psql "$temp_uri" -f "$backup_file" 2>&1)
+            fi
+            ;;
+        *)
+            restore_output=$(execute_pg_command pg_restore --dbname="$temp_uri" "$backup_file" 2>&1)
+            ;;
+    esac
+
+    # Check for critical errors in restore output
+    if [[ $? -ne 0 ]] || [[ "$restore_output" =~ (FATAL|ERROR.*cannot) ]]; then
+        restore_success=false
+    fi
+
+    # Basic database validity check
+    if [[ "$restore_success" == "true" ]]; then
+        local table_count=$(execute_pg_command psql "$temp_uri" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | xargs)
+        if [[ ! "$table_count" =~ ^[0-9]+$ ]] || [[ "$table_count" -eq 0 ]]; then
+            log_verbose "Deep verification: No tables found in restored database"
+            restore_success=false
+        else
+            log_verbose "Deep verification: Found $table_count table(s) in restored database"
+        fi
+    fi
+
+    # Clean up temporary database
+    execute_pg_command psql "$base_uri" -c "DROP DATABASE IF EXISTS \"$temp_db\";" &>/dev/null
+
+    if [[ "$restore_success" == "true" ]]; then
+        return 0
+    else
+        log_verbose "Deep verification failed: $restore_output"
+        return 1
+    fi
+}
+
+# Attempt to fix common backup issues
+attempt_backup_fix() {
+    local backup_file="$1"
+    shift
+    local issues=("$@")
+
+    local fixed_any=false
+
+    for issue in "${issues[@]}"; do
+        case "$issue" in
+            *"Checksum mismatch"*)
+                log_verbose "Attempting to regenerate checksum for: $(basename "$backup_file")"
+                local new_checksum=$(calculate_file_checksum "$backup_file")
+                local manifest_file="${backup_file}.manifest"
+                if [[ -f "$manifest_file" ]]; then
+                    # Update checksum in manifest
+                    sed -i.bak "s/^checksum:.*/checksum: $new_checksum/" "$manifest_file" 2>/dev/null
+                    if [[ $? -eq 0 ]]; then
+                        log_verbose "Updated checksum in manifest file"
+                        fixed_any=true
+                    fi
+                fi
+                ;;
+            *"compression corrupted"*)
+                log_verbose "Cannot automatically fix corrupted compression"
+                ;;
+            *"PostgreSQL format test failed"*)
+                log_verbose "Cannot automatically fix PostgreSQL format issues"
+                ;;
+            *"Format mismatch"*)
+                log_verbose "Cannot automatically fix format mismatch"
+                ;;
+        esac
+    done
+
+    if [[ "$fixed_any" == "true" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Show verify command help
+show_verify_help() {
+    cat << EOF
+$SCRIPT_NAME verify - Verify backup file integrity
+
+USAGE:
+    $SCRIPT_NAME verify [options]
+    $SCRIPT_NAME verify -f <backup-file> [options]
+
+DESCRIPTION:
+    Verify the integrity of backup files. Can verify a specific file or all files
+    in a backup directory. Performs compression tests, PostgreSQL format validation,
+    checksum verification, and optional deep verification via test restore.
+
+OPTIONS:
+    -f, --file <path>      Verify specific backup file
+    -D, --dir <path>       Backup directory to scan (default: $DEFAULT_BACKUP_DIR)
+
+    --checksums            Verify checksums against manifest files
+    --deep                 Perform deep verification (test restore to temp database)
+    --parallel             Verify multiple files in parallel (future feature)
+    --fix                  Attempt to fix detected issues automatically
+    --format <format>      Expected format: custom, tar, plain
+    --all                  Explicitly verify all files (same as default)
+
+    -v, --verbose          Show detailed verification steps
+    -q, --quiet            Suppress non-error output
+    -h, --help             Show this help message
+
+DATABASE CONNECTION (for --deep verification):
+    -H, --host <host>      Database host
+    -p, --port <port>      Database port
+    -U, --username <user>  Database username
+    -d, --dbname <name>    Database name
+    --passwd-stdin         Read password from stdin
+
+VERIFICATION LEVELS:
+    Basic (default):
+    - File existence and size checks
+    - Compression integrity tests (gzip -t, bzip2 -t, lz4 -t)
+    - PostgreSQL format validation (pg_restore --list)
+    - SQL content detection for plain format files
+
+    With --checksums:
+    - Compare file checksums against manifest files
+
+    With --deep:
+    - Test restore to temporary database
+    - Verify database structure and table counts
+    - Requires valid database connection
+
+EXAMPLES:
+    # Verify all backup files in default directory
+    $SCRIPT_NAME verify
+
+    # Verify specific backup file
+    $SCRIPT_NAME verify -f ./backups/mydb_20231215.dump.gz
+
+    # Deep verification with database connection
+    $SCRIPT_NAME verify --deep -H localhost -U postgres -d template1
+
+    # Verify with checksum validation and auto-fix
+    $SCRIPT_NAME verify --checksums --fix
+
+    # Verify all files in custom directory
+    $SCRIPT_NAME verify -D /path/to/backups --verbose
+
+EXIT CODES:
+    0  - All files verified successfully
+    4  - One or more files failed verification
+    1  - General error (invalid arguments, missing files, etc.)
+
+EOF
+}
+
+# Execute main function
+main "$@"

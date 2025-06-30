@@ -1,0 +1,1424 @@
+#!/bin/bash
+
+# Database Copy Script
+# Supports PostgreSQL database copying/cloning with full schema and data transfer
+
+set -euo pipefail
+
+# Script configuration
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_VERSION="1.0.0"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Global variables
+VERBOSE=false
+QUIET=false
+FORCE=false
+DRY_RUN=false
+SHOW_PROGRESS=false
+PROGRESS_INTERVAL=30
+
+# Source database connection parameters
+SRC_DB_HOST=""
+SRC_DB_PORT=""
+SRC_DB_USER=""
+SRC_DB_NAME=""
+SRC_DB_PASSWORD=""
+
+# Target database connection parameters  
+TARGET_DB_HOST=""
+TARGET_DB_PORT=""
+TARGET_DB_USER=""
+TARGET_DB_NAME=""
+TARGET_DB_PASSWORD=""
+
+# Copy options
+SCHEMA_ONLY=false
+DATA_ONLY=false
+DROP_TARGET=false
+CREATE_TARGET=true
+INCLUDE_EXTENSIONS=false
+EXCLUDE_LARGE_OBJECTS=false
+PARALLEL_JOBS=1
+
+# Fast copy options for same-server scenarios
+USE_TEMPLATE_COPY=false
+SYNC_MODE=false
+TRUNCATE_TABLES=false
+DISABLE_TRIGGERS=false
+DISABLE_INDEXES=false
+
+# Table filtering options
+INCLUDE_TABLES=()
+EXCLUDE_TABLES=()
+INCLUDE_SCHEMAS=()
+EXCLUDE_SCHEMAS=()
+
+# SSL Options
+SSL_MODE=""
+SSL_CERT=""
+SSL_KEY=""
+SSL_CA=""
+
+# Safety and validation options
+SKIP_CONFIRMATION=false
+VALIDATE_COPY=false
+CONNECTION_TIMEOUT=30
+COPY_TIMEOUT=0  # 0 = no timeout
+
+# Logging options
+LOG_FILE=""
+USE_SYSLOG=false
+
+# Temporary files tracking for cleanup
+TEMP_FILES=()
+
+# Exit codes
+EXIT_SUCCESS=0
+EXIT_GENERAL_ERROR=1
+EXIT_CONNECTION_ERROR=2
+EXIT_TARGET_EXISTS_ERROR=3
+EXIT_COPY_ERROR=4
+EXIT_VALIDATION_ERROR=5
+EXIT_TIMEOUT_ERROR=6
+
+# Advanced performance options
+OPTIMIZE_PERFORMANCE=false
+CHECKPOINT_FREQUENCY=""
+MAINTENANCE_WORK_MEM=""
+WORK_MEM=""
+SHARED_BUFFERS=""
+WAL_LEVEL=""
+
+# Input validation and security functions
+sanitize_for_log() {
+    local input="$1"
+    # Remove passwords and sensitive data from log output
+    echo "$input" | sed -E 's/(password|passwd|pass)[[:space:]]*[:=][[:space:]]*[^[:space:]&]+/\1=***REDACTED***/gi' | \
+                    sed -E 's/postgresql:\/\/[^:]*:[^@]*@/postgresql:\/\/user:***@/g'
+}
+
+sanitize_string() {
+    local input="$1"
+    # Remove potentially dangerous characters
+    echo "$input" | tr -d '`;|&$(){}[]<>*?~^!"'"'"
+}
+
+validate_db_name() {
+    local db_name="$1"
+    # PostgreSQL database name validation
+    if [[ ! "$db_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || [[ ${#db_name} -gt 63 ]]; then
+        log_error "Invalid database name: $db_name (must start with letter/underscore, contain only alphanumeric/underscore, max 63 chars)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+}
+
+validate_numeric() {
+    local value="$1"
+    local name="$2"
+    local min="${3:-0}"
+    local max="${4:-999999}"
+
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid numeric value for $name: $value (must be a number)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if [[ $value -lt $min ]] || [[ $value -gt $max ]]; then
+        log_error "Value out of range for $name: $value (must be between $min and $max)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+}
+
+# Logging functions
+log_info() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$QUIET" != "true" ]]; then
+        echo -e "${BLUE}[INFO]${NC} $safe_message" >&2
+    fi
+}
+
+log_success() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$QUIET" != "true" ]]; then
+        echo -e "${GREEN}[SUCCESS]${NC} $safe_message" >&2
+    fi
+}
+
+log_warning() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$QUIET" != "true" ]]; then
+        echo -e "${YELLOW}[WARNING]${NC} $safe_message" >&2
+    fi
+}
+
+log_error() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    echo -e "${RED}[ERROR]${NC} $safe_message" >&2
+}
+
+log_verbose() {
+    local message="$1"
+    local safe_message=$(sanitize_for_log "$message")
+    if [[ "$VERBOSE" == "true" && "$QUIET" != "true" ]]; then
+        echo -e "${BLUE}[VERBOSE]${NC} $safe_message" >&2
+    fi
+}
+
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+    
+    # Remove temporary files
+    if [[ ${#TEMP_FILES[@]} -gt 0 ]]; then
+        for temp_file in "${TEMP_FILES[@]}"; do
+            if [[ -f "$temp_file" ]]; then
+                rm -f "$temp_file" 2>/dev/null || true
+            elif [[ -d "$temp_file" ]]; then
+                rm -rf "$temp_file" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    log_verbose "Cleanup completed"
+    exit $exit_code
+}
+
+trap cleanup EXIT INT TERM
+
+# Database connection helper functions
+build_connection_string() {
+    local host="$1"
+    local port="$2"
+    local user="$3"
+    local dbname="$4"
+    local password="$5"
+    
+    local conn_str=""
+    
+    # Use environment variables first if available
+    if [[ -n "${DATABASE_URL:-}" ]]; then
+        # Use DATABASE_URL but override specific parameters if provided
+        conn_str="$DATABASE_URL"
+        if [[ -n "$dbname" ]]; then
+            conn_str=$(echo "$conn_str" | sed "s|/[^/]*$|/$dbname|")
+        fi
+    else
+        # Build connection string from components
+        conn_str="postgresql://"
+        if [[ -n "$user" ]]; then
+            conn_str="${conn_str}${user}"
+            if [[ -n "$password" ]]; then
+                conn_str="${conn_str}:${password}"
+            fi
+            conn_str="${conn_str}@"
+        fi
+        
+        conn_str="${conn_str}${host:-localhost}"
+        
+        if [[ -n "$port" ]]; then
+            conn_str="${conn_str}:${port}"
+        fi
+        
+        if [[ -n "$dbname" ]]; then
+            conn_str="${conn_str}/${dbname}"
+        fi
+    fi
+    
+    # Add SSL parameters if specified
+    local ssl_params=""
+    if [[ -n "$SSL_MODE" ]]; then
+        ssl_params="${ssl_params}sslmode=${SSL_MODE}&"
+    fi
+    if [[ -n "$SSL_CERT" ]]; then
+        ssl_params="${ssl_params}sslcert=${SSL_CERT}&"
+    fi
+    if [[ -n "$SSL_KEY" ]]; then
+        ssl_params="${ssl_params}sslkey=${SSL_KEY}&"
+    fi
+    if [[ -n "$SSL_CA" ]]; then
+        ssl_params="${ssl_params}sslrootcert=${SSL_CA}&"
+    fi
+    
+    if [[ -n "$ssl_params" ]]; then
+        ssl_params="${ssl_params%&}"  # Remove trailing &
+        if [[ "$conn_str" == *"?"* ]]; then
+            conn_str="${conn_str}&${ssl_params}"
+        else
+            conn_str="${conn_str}?${ssl_params}"
+        fi
+    fi
+    
+    echo "$conn_str"
+}
+
+execute_pg_command() {
+    local command="$1"
+    local connection_string="$2"
+    shift 2
+    
+    log_verbose "Executing: $command $(sanitize_for_log "$*")"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would execute: $command $*"
+        return 0
+    fi
+    
+    # Execute the command with timeout if specified
+    if [[ $CONNECTION_TIMEOUT -gt 0 ]]; then
+        timeout "$CONNECTION_TIMEOUT" "$command" "$connection_string" "$@"
+    else
+        "$command" "$connection_string" "$@"
+    fi
+}
+
+test_connection() {
+    local connection_string="$1"
+    local db_label="$2"
+    
+    log_verbose "Testing connection to $db_label database"
+    
+    if ! execute_pg_command psql "$connection_string" -c "SELECT 1;" &>/dev/null; then
+        log_error "Cannot connect to $db_label database: $(sanitize_for_log "$connection_string")"
+        return $EXIT_CONNECTION_ERROR
+    fi
+    
+    log_verbose "Connection to $db_label database successful"
+    return 0
+}
+
+check_database_exists() {
+    local connection_string="$1"
+    local dbname="$2"
+    
+    # Connect to default database to check if target exists
+    local base_conn=$(echo "$connection_string" | sed 's|/[^/]*$|/postgres|')
+    
+    local exists=$(execute_pg_command psql "$base_conn" -t -c "SELECT 1 FROM pg_database WHERE datname='$dbname';" 2>/dev/null | xargs)
+    
+    if [[ "$exists" == "1" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+get_database_info() {
+    local connection_string="$1"
+    local info_type="$2"
+    
+    case "$info_type" in
+        "size")
+            execute_pg_command psql "$connection_string" -t -c "SELECT pg_size_pretty(pg_database_size(current_database()));" 2>/dev/null | xargs
+            ;;
+        "table_count")
+            execute_pg_command psql "$connection_string" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | xargs
+            ;;
+        "version")
+            execute_pg_command psql "$connection_string" -t -c "SELECT version();" 2>/dev/null | xargs
+            ;;
+        "row_count")
+            local table_name="$3"
+            execute_pg_command psql "$connection_string" -t -c "SELECT COUNT(*) FROM \"$table_name\";" 2>/dev/null | xargs
+            ;;
+        "encoding")
+            execute_pg_command psql "$connection_string" -t -c "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = current_database();" 2>/dev/null | xargs
+            ;;
+        "collation")
+            execute_pg_command psql "$connection_string" -t -c "SELECT datcollate FROM pg_database WHERE datname = current_database();" 2>/dev/null | xargs
+            ;;
+        *)
+            echo "Unknown info type: $info_type" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Check if source and target are on the same server
+is_same_server() {
+    local src_host="$1"
+    local src_port="$2"
+    local target_host="$3"
+    local target_port="$4"
+    
+    # Normalize hosts
+    [[ "$src_host" == "localhost" ]] && src_host="127.0.0.1"
+    [[ "$target_host" == "localhost" ]] && target_host="127.0.0.1"
+    
+    if [[ "$src_host" == "$target_host" && "$src_port" == "$target_port" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Fast template-based copy for same server
+copy_using_template() {
+    local src_conn="$1"
+    local target_conn="$2"
+    
+    log_info "Using fast template-based copy (same server)"
+    
+    # Connect to default database to create target with template
+    local base_conn=$(echo "$target_conn" | sed 's|/[^/]*$|/postgres|')
+    
+    # Get source database encoding and collation for compatibility
+    local src_encoding=$(get_database_info "$src_conn" "encoding")
+    local src_collation=$(get_database_info "$src_conn" "collation")
+    
+    log_verbose "Source database encoding: $src_encoding, collation: $src_collation"
+    
+    # Create database using template
+    local create_sql="CREATE DATABASE \"$TARGET_DB_NAME\" WITH TEMPLATE \"$SRC_DB_NAME\""
+    
+    if [[ -n "$src_encoding" ]]; then
+        create_sql="$create_sql ENCODING '$src_encoding'"
+    fi
+    
+    log_verbose "Creating database with template: $create_sql"
+    
+    if ! execute_pg_command psql "$base_conn" -c "$create_sql;" 2>/dev/null; then
+        log_error "Failed to create database using template. Falling back to dump/restore method."
+        return 1
+    fi
+    
+    log_success "Fast template copy completed"
+    return 0
+}
+
+# Sync existing database with source
+sync_database() {
+    local src_conn="$1"
+    local target_conn="$2"
+    
+    log_info "Syncing existing database with source"
+    
+    # Get table lists for comparison
+    local src_tables=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
+    local target_tables=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
+    
+    log_verbose "Analyzing schema differences..."
+    
+    # Drop tables that exist in target but not in source
+    while IFS= read -r table; do
+        [[ -z "$table" ]] && continue
+        table=$(echo "$table" | xargs)  # trim whitespace
+        if ! echo "$src_tables" | grep -q "^$table$"; then
+            log_verbose "Dropping table not in source: $table"
+            if [[ "$DRY_RUN" != "true" ]]; then
+                execute_pg_command psql "$target_conn" -c "DROP TABLE IF EXISTS \"$table\" CASCADE;" &>/dev/null || true
+            fi
+        fi
+    done <<< "$target_tables"
+    
+    # Use pg_dump with --clean to handle schema changes and data sync
+    local temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
+    
+    # Build sync-optimized dump options
+    local dump_options=("--no-owner" "--no-privileges" "--clean" "--if-exists")
+    
+    if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then
+        dump_options+=("--extension=*")
+    fi
+    
+    if [[ "$EXCLUDE_LARGE_OBJECTS" == "true" ]]; then
+        dump_options+=("--no-blobs")
+    fi
+    
+    # Add table filtering options
+    add_table_filters dump_options
+    
+    # Performance optimizations for sync
+    if [[ "$DISABLE_TRIGGERS" == "true" ]]; then
+        echo "SET session_replication_role = replica;" > "$temp_file"
+    fi
+    
+    # Dump and restore
+    log_verbose "Dumping source database for sync"
+    execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" >> "$temp_file"
+    
+    if [[ "$DISABLE_TRIGGERS" == "true" ]]; then
+        echo "SET session_replication_role = DEFAULT;" >> "$temp_file"
+    fi
+    
+    log_verbose "Applying changes to target database"
+    if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
+        log_error "Failed to sync database"
+        exit $EXIT_COPY_ERROR
+    fi
+    
+    log_success "Database sync completed"
+}
+
+# Optimize database performance settings
+optimize_database_performance() {
+    local connection_string="$1"
+    local operation="$2"  # "start" or "restore"
+    
+    if [[ "$OPTIMIZE_PERFORMANCE" != "true" ]]; then
+        return 0
+    fi
+    
+    log_verbose "Optimizing database performance for $operation"
+    
+    case "$operation" in
+        "start")
+            # Store original settings
+            local original_settings=$(mktemp)
+            TEMP_FILES+=("$original_settings")
+            
+            execute_pg_command psql "$connection_string" -t -c "SELECT name, setting FROM pg_settings WHERE name IN ('maintenance_work_mem', 'work_mem', 'checkpoint_completion_target', 'wal_buffers');" > "$original_settings"
+            
+            # Apply performance optimizations
+            [[ -n "$MAINTENANCE_WORK_MEM" ]] && execute_pg_command psql "$connection_string" -c "SET maintenance_work_mem = '$MAINTENANCE_WORK_MEM';" &>/dev/null
+            [[ -n "$WORK_MEM" ]] && execute_pg_command psql "$connection_string" -c "SET work_mem = '$WORK_MEM';" &>/dev/null
+            execute_pg_command psql "$connection_string" -c "SET checkpoint_completion_target = 0.9;" &>/dev/null
+            execute_pg_command psql "$connection_string" -c "SET synchronous_commit = off;" &>/dev/null
+            ;;
+        "restore")
+            # Restore original settings
+            execute_pg_command psql "$connection_string" -c "RESET maintenance_work_mem;" &>/dev/null
+            execute_pg_command psql "$connection_string" -c "RESET work_mem;" &>/dev/null
+            execute_pg_command psql "$connection_string" -c "RESET checkpoint_completion_target;" &>/dev/null
+            execute_pg_command psql "$connection_string" -c "RESET synchronous_commit;" &>/dev/null
+            ;;
+    esac
+}
+
+# Copy operations
+copy_database() {
+    local src_conn="$1"
+    local target_conn="$2"
+    
+    log_info "Starting database copy operation"
+    log_verbose "Source: $(sanitize_for_log "$src_conn")"
+    log_verbose "Target: $(sanitize_for_log "$target_conn")"
+    
+    # Test connections
+    test_connection "$src_conn" "source" || exit $EXIT_CONNECTION_ERROR
+    
+    # Detect if we're copying on the same server for optimization
+    local same_server=false
+    if is_same_server "$SRC_DB_HOST" "$SRC_DB_PORT" "$TARGET_DB_HOST" "$TARGET_DB_PORT"; then
+        same_server=true
+        log_verbose "Detected same-server copy - fast optimizations available"
+    fi
+    
+    # Check if target database exists
+    local target_db_exists=false
+    if check_database_exists "$target_conn" "$TARGET_DB_NAME"; then
+        target_db_exists=true
+        
+        # Get target database info for comparison
+        local target_size=$(get_database_info "$target_conn" "size")
+        local target_table_count=$(get_database_info "$target_conn" "table_count")
+        
+        log_warning "Target database '$TARGET_DB_NAME' already exists ($target_table_count tables, $target_size)"
+        
+        if [[ "$SYNC_MODE" == "true" ]]; then
+            log_info "Sync mode enabled - will synchronize with source database"
+        elif [[ "$DROP_TARGET" == "true" ]]; then
+            log_warning "Target database will be dropped and recreated"
+            if [[ "$SKIP_CONFIRMATION" != "true" ]]; then
+                read -p "Are you sure you want to drop the target database? (y/N): " -r
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    log_info "Operation cancelled by user"
+                    exit $EXIT_SUCCESS
+                fi
+            fi
+            drop_target_database "$target_conn"
+            target_db_exists=false
+        elif [[ "$FORCE" != "true" ]]; then
+            log_error "Target database already exists. Options:"
+            log_error "  --drop-target    : Drop and recreate target database"
+            log_error "  --sync           : Sync target database with source"
+            log_error "  --force          : Append/overwrite data in existing database"
+            exit $EXIT_TARGET_EXISTS_ERROR
+        else
+            log_warning "Force mode enabled - will overwrite existing data"
+        fi
+    fi
+    
+    # Create target database if needed
+    if [[ "$target_db_exists" == "false" && "$CREATE_TARGET" == "true" ]]; then
+        # Try fast template copy for same-server scenarios first
+        if [[ "$same_server" == "true" && "$USE_TEMPLATE_COPY" == "true" && "$SCHEMA_ONLY" != "true" && "$DATA_ONLY" != "true" && ${#INCLUDE_TABLES[@]} -eq 0 && ${#EXCLUDE_TABLES[@]} -eq 0 ]]; then
+            log_info "Attempting fast template-based copy"
+            if copy_using_template "$src_conn" "$target_conn"; then
+                # Template copy succeeded, skip regular copy
+                log_success "Fast template copy completed successfully"
+                
+                # Validate copy if requested
+                if [[ "$VALIDATE_COPY" == "true" ]]; then
+                    validate_copy_result "$src_conn" "$target_conn"
+                fi
+                
+                # Get final target database info
+                local final_target_size=$(get_database_info "$target_conn" "size")
+                local final_target_table_count=$(get_database_info "$target_conn" "table_count")
+                log_info "Target database: $final_target_table_count tables, $final_target_size"
+                return 0
+            else
+                log_info "Template copy failed, falling back to dump/restore method"
+            fi
+        fi
+        
+        create_target_database "$target_conn"
+    fi
+    
+    # Test target connection
+    test_connection "$target_conn" "target" || exit $EXIT_CONNECTION_ERROR
+    
+    # Get source database info
+    local src_size=$(get_database_info "$src_conn" "size")
+    local src_table_count=$(get_database_info "$src_conn" "table_count") 
+    log_info "Source database: $src_table_count tables, $src_size"
+    
+    # Apply performance optimizations
+    optimize_database_performance "$target_conn" "start"
+    
+    # Perform the actual copy
+    if [[ "$SYNC_MODE" == "true" && "$target_db_exists" == "true" ]]; then
+        sync_database "$src_conn" "$target_conn"
+    elif [[ "$SCHEMA_ONLY" == "true" ]]; then
+        copy_schema_only "$src_conn" "$target_conn"
+    elif [[ "$DATA_ONLY" == "true" ]]; then
+        copy_data_only "$src_conn" "$target_conn"
+    else
+        copy_full_database "$src_conn" "$target_conn"
+    fi
+    
+    # Restore performance settings
+    optimize_database_performance "$target_conn" "restore"
+    
+    # Validate copy if requested
+    if [[ "$VALIDATE_COPY" == "true" ]]; then
+        if ! validate_copy_result "$src_conn" "$target_conn"; then
+            log_warning "Validation detected differences between source and target databases"
+            if [[ "$FORCE" != "true" ]]; then
+                exit $EXIT_VALIDATION_ERROR
+            fi
+        fi
+    fi
+    
+    # Get target database info
+    local target_size=$(get_database_info "$target_conn" "size")
+    local target_table_count=$(get_database_info "$target_conn" "table_count")
+    log_success "Database copy completed successfully"
+    log_info "Target database: $target_table_count tables, $target_size"
+}
+
+create_target_database() {
+    local target_conn="$1"
+    
+    log_info "Creating target database: $TARGET_DB_NAME"
+    
+    # Connect to default database to create target
+    local base_conn=$(echo "$target_conn" | sed 's|/[^/]*$|/postgres|')
+    
+    if ! execute_pg_command psql "$base_conn" -c "CREATE DATABASE \"$TARGET_DB_NAME\";" 2>/dev/null; then
+        log_error "Failed to create target database: $TARGET_DB_NAME"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    log_verbose "Target database created successfully"
+}
+
+drop_target_database() {
+    local target_conn="$1"
+    
+    log_info "Dropping target database: $TARGET_DB_NAME"
+    
+    # Connect to default database to drop target
+    local base_conn=$(echo "$target_conn" | sed 's|/[^/]*$|/postgres|')
+    
+    # Terminate connections to target database
+    execute_pg_command psql "$base_conn" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$TARGET_DB_NAME';" &>/dev/null || true
+    
+    if ! execute_pg_command psql "$base_conn" -c "DROP DATABASE IF EXISTS \"$TARGET_DB_NAME\";" 2>/dev/null; then
+        log_error "Failed to drop target database: $TARGET_DB_NAME"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    log_verbose "Target database dropped successfully"
+}
+
+copy_schema_only() {
+    local src_conn="$1"
+    local target_conn="$2"
+    
+    log_info "Copying schema only (no data)"
+    
+    local temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
+    
+    # Build pg_dump options
+    local dump_options=("--schema-only" "--no-owner" "--no-privileges")
+    
+    if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then
+        dump_options+=("--extension=*")
+    fi
+    
+    # Add table filtering options
+    add_table_filters dump_options
+    
+    # Dump schema
+    log_verbose "Dumping schema from source database"
+    if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" > "$temp_file"; then
+        log_error "Failed to dump schema from source database"
+        exit $EXIT_COPY_ERROR
+    fi
+    
+    # Restore schema  
+    log_verbose "Restoring schema to target database"
+    if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
+        log_error "Failed to restore schema to target database"
+        exit $EXIT_COPY_ERROR
+    fi
+    
+    log_success "Schema copy completed"
+}
+
+copy_data_only() {
+    local src_conn="$1"
+    local target_conn="$2"
+    
+    log_info "Copying data only (no schema)"
+    
+    local temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
+    
+    # Build pg_dump options
+    local dump_options=("--data-only" "--no-owner" "--no-privileges")
+    
+    if [[ "$EXCLUDE_LARGE_OBJECTS" == "true" ]]; then
+        dump_options+=("--no-blobs")
+    fi
+    
+    # Add table filtering options
+    add_table_filters dump_options
+    
+    # Dump data
+    log_verbose "Dumping data from source database"
+    if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" > "$temp_file"; then
+        log_error "Failed to dump data from source database"
+        exit $EXIT_COPY_ERROR
+    fi
+    
+    # Restore data
+    log_verbose "Restoring data to target database"
+    if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
+        log_error "Failed to restore data to target database"
+        exit $EXIT_COPY_ERROR
+    fi
+    
+    log_success "Data copy completed"
+}
+
+copy_full_database() {
+    local src_conn="$1"
+    local target_conn="$2"
+    
+    log_info "Copying full database (schema and data)"
+    
+    local temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
+    
+    # Build pg_dump options
+    local dump_options=("--no-owner" "--no-privileges" "--clean")
+    
+    if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then
+        dump_options+=("--extension=*")
+    fi
+    
+    if [[ "$EXCLUDE_LARGE_OBJECTS" == "true" ]]; then
+        dump_options+=("--no-blobs")
+    fi
+    
+    if [[ $PARALLEL_JOBS -gt 1 ]]; then
+        dump_options+=("--jobs=$PARALLEL_JOBS")
+        dump_options+=("--format=directory")
+        
+        # Create temporary directory for parallel dump
+        local temp_dir=$(mktemp -d)
+        TEMP_FILES+=("$temp_dir")
+        temp_file="$temp_dir"
+    fi
+    
+    # Add table filtering options
+    add_table_filters dump_options
+    
+    # Dump database
+    log_verbose "Dumping database from source"
+    if ! execute_pg_command pg_dump "$src_conn" "${dump_options[@]}" "$temp_file"; then
+        log_error "Failed to dump database from source"
+        exit $EXIT_COPY_ERROR
+    fi
+    
+    # Restore database
+    log_verbose "Restoring database to target"
+    if [[ $PARALLEL_JOBS -gt 1 ]]; then
+        # Use pg_restore for directory format
+        local restore_options=("--jobs=$PARALLEL_JOBS" "--no-owner" "--no-privileges")
+        if ! execute_pg_command pg_restore "$target_conn" "${restore_options[@]}" "$temp_file"; then
+            log_error "Failed to restore database to target"
+            exit $EXIT_COPY_ERROR
+        fi
+    else
+        # Use psql for plain format
+        if ! execute_pg_command psql "$target_conn" -f "$temp_file" &>/dev/null; then
+            log_error "Failed to restore database to target"
+            exit $EXIT_COPY_ERROR
+        fi
+    fi
+    
+    log_success "Full database copy completed"
+}
+
+add_table_filters() {
+    local -n options_ref=$1
+    
+    # Add include tables
+    for table in "${INCLUDE_TABLES[@]}"; do
+        options_ref+=("--table=$table")
+    done
+    
+    # Add exclude tables
+    for table in "${EXCLUDE_TABLES[@]}"; do
+        options_ref+=("--exclude-table=$table")
+    done
+    
+    # Add include schemas
+    for schema in "${INCLUDE_SCHEMAS[@]}"; do
+        options_ref+=("--schema=$schema")
+    done
+    
+    # Add exclude schemas
+    for schema in "${EXCLUDE_SCHEMAS[@]}"; do
+        options_ref+=("--exclude-schema=$schema")
+    done
+}
+
+validate_copy_result() {
+    local src_conn="$1"
+    local target_conn="$2"
+    
+    log_info "Validating copy result"
+    local validation_errors=0
+    
+    # Compare table counts
+    local src_tables=$(get_database_info "$src_conn" "table_count")
+    local target_tables=$(get_database_info "$target_conn" "table_count")
+    
+    if [[ "$src_tables" != "$target_tables" ]]; then
+        log_warning "Table count mismatch: source=$src_tables, target=$target_tables"
+        ((validation_errors++))
+    else
+        log_verbose "Table count validation passed: $src_tables tables"
+    fi
+    
+    # Compare database sizes
+    local src_size=$(get_database_info "$src_conn" "size")
+    local target_size=$(get_database_info "$target_conn" "size")
+    log_verbose "Database sizes: source=$src_size, target=$target_size"
+    
+    # Get list of tables for detailed validation
+    local table_list=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
+    
+    # Validate row counts for each table
+    log_verbose "Validating row counts for each table..."
+    while IFS= read -r table; do
+        [[ -z "$table" ]] && continue
+        table=$(echo "$table" | xargs)  # trim whitespace
+        
+        local src_rows=$(get_database_info "$src_conn" "row_count" "$table")
+        local target_rows=$(get_database_info "$target_conn" "row_count" "$table")
+        
+        if [[ "$src_rows" != "$target_rows" ]]; then
+            log_warning "Row count mismatch in table $table: source=$src_rows, target=$target_rows"
+            ((validation_errors++))
+        else
+            log_verbose "Table $table: $src_rows rows (validated)"
+        fi
+    done <<< "$table_list"
+    
+    # Validate schema structure
+    log_verbose "Validating schema structure..."
+    local src_schema=$(execute_pg_command psql "$src_conn" -t -c "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null)
+    local target_schema=$(execute_pg_command psql "$target_conn" -t -c "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null)
+    
+    if [[ "$src_schema" != "$target_schema" ]]; then
+        log_warning "Schema structure differences detected"
+        ((validation_errors++))
+    else
+        log_verbose "Schema structure validation passed"
+    fi
+    
+    # Validate indexes
+    log_verbose "Validating indexes..."
+    local src_indexes=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY tablename, indexname;" 2>/dev/null)
+    local target_indexes=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY tablename, indexname;" 2>/dev/null)
+    
+    if [[ "$src_indexes" != "$target_indexes" ]]; then
+        log_warning "Index differences detected"
+        ((validation_errors++))
+    else
+        log_verbose "Index validation passed"
+    fi
+    
+    # Validate sequences
+    log_verbose "Validating sequences..."
+    local src_sequences=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname = 'public' ORDER BY sequencename;" 2>/dev/null)
+    local target_sequences=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname = 'public' ORDER BY sequencename;" 2>/dev/null)
+    
+    if [[ "$src_sequences" != "$target_sequences" ]]; then
+        log_warning "Sequence differences detected"
+        ((validation_errors++))
+    else
+        log_verbose "Sequence validation passed"
+    fi
+    
+    # Validate constraints
+    log_verbose "Validating constraints..."
+    local src_constraints=$(execute_pg_command psql "$src_conn" -t -c "SELECT conname, contype FROM pg_constraint WHERE connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public') ORDER BY conname;" 2>/dev/null)
+    local target_constraints=$(execute_pg_command psql "$target_conn" -t -c "SELECT conname, contype FROM pg_constraint WHERE connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public') ORDER BY conname;" 2>/dev/null)
+    
+    if [[ "$src_constraints" != "$target_constraints" ]]; then
+        log_warning "Constraint differences detected"
+        ((validation_errors++))
+    else
+        log_verbose "Constraint validation passed"
+    fi
+    
+    # Summary
+    if [[ $validation_errors -gt 0 ]]; then
+        log_warning "Copy validation completed with $validation_errors issues"
+        return 1
+    else
+        log_success "Copy validation completed successfully - databases are identical"
+        return 0
+    fi
+}
+
+# Command functions
+cmd_copy() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            # Source database options
+            --src-host)
+                SRC_DB_HOST="$2"
+                shift 2
+                ;;
+            --src-port)
+                SRC_DB_PORT="$2"
+                validate_numeric "$SRC_DB_PORT" "source port" 1 65535
+                shift 2
+                ;;
+            --src-user)
+                SRC_DB_USER="$2"
+                shift 2
+                ;;
+            --src-dbname)
+                SRC_DB_NAME="$2"
+                validate_db_name "$SRC_DB_NAME"
+                shift 2
+                ;;
+            --src-password)
+                SRC_DB_PASSWORD="$2"
+                shift 2
+                ;;
+            # Target database options
+            --target-host)
+                TARGET_DB_HOST="$2"
+                shift 2
+                ;;
+            --target-port)
+                TARGET_DB_PORT="$2"
+                validate_numeric "$TARGET_DB_PORT" "target port" 1 65535
+                shift 2
+                ;;
+            --target-user)
+                TARGET_DB_USER="$2"
+                shift 2
+                ;;
+            --target-dbname)
+                TARGET_DB_NAME="$2"
+                validate_db_name "$TARGET_DB_NAME"
+                shift 2
+                ;;
+            --target-password)
+                TARGET_DB_PASSWORD="$2"
+                shift 2
+                ;;
+            # Legacy unified options (for same-server copies)
+            -H|--host)
+                SRC_DB_HOST="$2"
+                TARGET_DB_HOST="$2"
+                shift 2
+                ;;
+            -p|--port)
+                SRC_DB_PORT="$2"
+                TARGET_DB_PORT="$2"
+                validate_numeric "$SRC_DB_PORT" "port" 1 65535
+                shift 2
+                ;;
+            -U|--username)
+                SRC_DB_USER="$2"
+                TARGET_DB_USER="$2"
+                shift 2
+                ;;
+            -d|--dbname)
+                SRC_DB_NAME="$2"
+                validate_db_name "$SRC_DB_NAME"
+                shift 2
+                ;;
+            --password)
+                read -s -p "Enter password: " password
+                echo
+                SRC_DB_PASSWORD="$password"
+                TARGET_DB_PASSWORD="$password"
+                shift
+                ;;
+            # Copy options
+            --schema-only)
+                SCHEMA_ONLY=true
+                shift
+                ;;
+            --data-only)
+                DATA_ONLY=true
+                shift
+                ;;
+            --drop-target)
+                DROP_TARGET=true
+                shift
+                ;;
+            --no-create-target)
+                CREATE_TARGET=false
+                shift
+                ;;
+            --include-extensions)
+                INCLUDE_EXTENSIONS=true
+                shift
+                ;;
+            --exclude-large-objects)
+                EXCLUDE_LARGE_OBJECTS=true
+                shift
+                ;;
+            --jobs)
+                PARALLEL_JOBS="$2"
+                validate_numeric "$PARALLEL_JOBS" "parallel jobs" 1 32
+                shift 2
+                ;;
+            # Fast copy and sync options
+            --fast|--use-template)
+                USE_TEMPLATE_COPY=true
+                shift
+                ;;
+            --sync)
+                SYNC_MODE=true
+                shift
+                ;;
+            --truncate-tables)
+                TRUNCATE_TABLES=true
+                shift
+                ;;
+            --disable-triggers)
+                DISABLE_TRIGGERS=true
+                shift
+                ;;
+            --disable-indexes)
+                DISABLE_INDEXES=true
+                shift
+                ;;
+            # Performance optimization options
+            --optimize-performance)
+                OPTIMIZE_PERFORMANCE=true
+                shift
+                ;;
+            --maintenance-work-mem)
+                MAINTENANCE_WORK_MEM="$2"
+                shift 2
+                ;;
+            --work-mem)
+                WORK_MEM="$2"
+                shift 2
+                ;;
+            # Table filtering
+            --include-table)
+                INCLUDE_TABLES+=("$2")
+                shift 2
+                ;;
+            --exclude-table)
+                EXCLUDE_TABLES+=("$2")
+                shift 2
+                ;;
+            --include-schema)
+                INCLUDE_SCHEMAS+=("$2")
+                shift 2
+                ;;
+            --exclude-schema)
+                EXCLUDE_SCHEMAS+=("$2")
+                shift 2
+                ;;
+            # Safety and validation
+            --skip-confirmation)
+                SKIP_CONFIRMATION=true
+                shift
+                ;;
+            --validate)
+                VALIDATE_COPY=true
+                shift
+                ;;
+            --connection-timeout)
+                CONNECTION_TIMEOUT="$2"
+                validate_numeric "$CONNECTION_TIMEOUT" "connection timeout" 1 3600
+                shift 2
+                ;;
+            # SSL options
+            --sslmode)
+                SSL_MODE="$2"
+                shift 2
+                ;;
+            --sslcert)
+                SSL_CERT="$2"
+                shift 2
+                ;;
+            --sslkey)
+                SSL_KEY="$2"
+                shift 2
+                ;;
+            --sslrootcert)
+                SSL_CA="$2"
+                shift 2
+                ;;
+            # Progress and logging
+            --progress)
+                SHOW_PROGRESS=true
+                shift
+                ;;
+            --progress-interval)
+                PROGRESS_INTERVAL="$2"
+                validate_numeric "$PROGRESS_INTERVAL" "progress interval" 1 300
+                shift 2
+                ;;
+            --log-file)
+                LOG_FILE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_copy_help
+                exit $EXIT_SUCCESS
+                ;;
+            *)
+                log_error "Unknown option for copy command: $1"
+                show_copy_help
+                exit $EXIT_GENERAL_ERROR
+                ;;
+        esac
+    done
+    
+    # Validate required parameters
+    if [[ -z "$SRC_DB_NAME" ]]; then
+        log_error "Source database name is required (--src-dbname or -d)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    if [[ -z "$TARGET_DB_NAME" ]]; then
+        log_error "Target database name is required (--target-dbname)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    # Set default values
+    SRC_DB_HOST="${SRC_DB_HOST:-localhost}"
+    SRC_DB_PORT="${SRC_DB_PORT:-5432}"
+    TARGET_DB_HOST="${TARGET_DB_HOST:-$SRC_DB_HOST}"
+    TARGET_DB_PORT="${TARGET_DB_PORT:-$SRC_DB_PORT}"
+    TARGET_DB_USER="${TARGET_DB_USER:-$SRC_DB_USER}"
+    
+    # Validate mutually exclusive options
+    if [[ "$SCHEMA_ONLY" == "true" && "$DATA_ONLY" == "true" ]]; then
+        log_error "Cannot specify both --schema-only and --data-only"
+        exit $EXIT_GENERAL_ERROR
+    fi
+    
+    # Build connection strings
+    local src_conn=$(build_connection_string "$SRC_DB_HOST" "$SRC_DB_PORT" "$SRC_DB_USER" "$SRC_DB_NAME" "$SRC_DB_PASSWORD")
+    local target_conn=$(build_connection_string "$TARGET_DB_HOST" "$TARGET_DB_PORT" "$TARGET_DB_USER" "$TARGET_DB_NAME" "$TARGET_DB_PASSWORD")
+    
+    # Perform the copy
+    copy_database "$src_conn" "$target_conn"
+}
+
+cmd_clone() {
+    # Clone is an alias for copy
+    cmd_copy "$@"
+}
+
+# Help functions
+show_help() {
+    cat << EOF
+$SCRIPT_NAME v$SCRIPT_VERSION - PostgreSQL Database Copy Tool
+
+USAGE:
+    $SCRIPT_NAME <command> [options]
+
+COMMANDS:
+    copy, clone         Copy/clone a database from source to target
+    help                Show this help message
+    version             Show version information
+
+GLOBAL OPTIONS:
+    -v, --verbose       Enable verbose output
+    -q, --quiet         Suppress all output except errors
+    --dry-run           Show what would be done without executing
+    --force             Force operation (overwrite existing data)
+    -h, --help          Show help message
+
+For command-specific help, use:
+    $SCRIPT_NAME <command> --help
+
+EXAMPLES:
+    # Copy database on same server
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_copy
+
+    # Copy database between servers
+    $SCRIPT_NAME copy \\
+        --src-host prod.example.com --src-user postgres --src-dbname myapp \\
+        --target-host staging.example.com --target-user postgres --target-dbname myapp_staging
+
+    # Copy schema only
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_schema --schema-only
+
+    # Copy with table filtering
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_filtered \\
+        --include-table users --include-table orders --exclude-table temp_*
+
+EOF
+}
+
+show_copy_help() {
+    cat << EOF
+$SCRIPT_NAME copy - Copy/clone a PostgreSQL database
+
+USAGE:
+    $SCRIPT_NAME copy [options]
+
+DESCRIPTION:
+    Copy or clone a PostgreSQL database from a source to a target. Can copy
+    within the same server or between different servers. Supports schema-only,
+    data-only, or full database copies with extensive filtering options.
+
+SOURCE DATABASE OPTIONS:
+    --src-host <host>        Source database host
+    --src-port <port>        Source database port
+    --src-user <user>        Source database username
+    --src-dbname <name>      Source database name
+    --src-password <pass>    Source database password
+
+TARGET DATABASE OPTIONS:
+    --target-host <host>     Target database host
+    --target-port <port>     Target database port
+    --target-user <user>     Target database username
+    --target-dbname <name>   Target database name (required)
+    --target-password <pass> Target database password
+
+LEGACY UNIFIED OPTIONS (for same-server copies):
+    -H, --host <host>        Database host (applies to both source and target)
+    -p, --port <port>        Database port (applies to both source and target)
+    -U, --username <user>    Database username (applies to both source and target)
+    -d, --dbname <name>      Source database name
+    --password               Prompt for password (applies to both source and target)
+
+COPY OPTIONS:
+    --schema-only            Copy schema only (no data)
+    --data-only              Copy data only (no schema)
+    --drop-target            Drop target database if it exists
+    --no-create-target       Don't create target database (must exist)
+    --include-extensions     Include database extensions
+    --exclude-large-objects  Exclude large objects (BLOBs)
+    --jobs <n>               Use parallel processing with n jobs
+
+FAST COPY OPTIONS (same-server only):
+    --fast, --use-template   Use CREATE DATABASE WITH TEMPLATE for instant copying
+    --sync                   Sync existing target database with source (incremental update)
+
+PERFORMANCE OPTIMIZATION OPTIONS:
+    --optimize-performance   Enable PostgreSQL performance optimizations
+    --maintenance-work-mem <size>  Set maintenance_work_mem (e.g., '256MB')
+    --work-mem <size>        Set work_mem for operations (e.g., '64MB')
+    --disable-triggers       Disable triggers during data load (faster)
+    --disable-indexes        Disable non-essential indexes during copy
+    --truncate-tables        Truncate existing tables before copy (with --sync)
+
+TABLE FILTERING OPTIONS:
+    --include-table <table>  Include specific table (can be used multiple times)
+    --exclude-table <table>  Exclude specific table (can be used multiple times)
+    --include-schema <schema> Include specific schema (can be used multiple times)
+    --exclude-schema <schema> Exclude specific schema (can be used multiple times)
+
+SAFETY AND VALIDATION OPTIONS:
+    --skip-confirmation      Skip confirmation prompts
+    --validate               Validate copy result
+    --connection-timeout <s> Connection timeout in seconds (default: 30)
+
+SSL OPTIONS:
+    --sslmode <mode>         SSL mode (require, prefer, disable)
+    --sslcert <file>         SSL certificate file
+    --sslkey <file>          SSL key file
+    --sslrootcert <file>     SSL root certificate file
+
+PROGRESS AND LOGGING OPTIONS:
+    --progress               Show progress updates
+    --progress-interval <s>  Progress update interval in seconds (default: 30)
+    --log-file <file>        Log to file
+
+    -v, --verbose            Show detailed operation steps
+    -q, --quiet              Suppress non-error output
+    --dry-run                Show what would be done without executing
+    --force                  Force operation (overwrite existing data)
+    -h, --help               Show this help message
+
+EXAMPLES:
+    # Copy database on same server
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_copy
+
+    # Copy between different servers
+    $SCRIPT_NAME copy \\
+        --src-host prod.example.com --src-user postgres --src-dbname myapp \\
+        --target-host staging.example.com --target-user postgres --target-dbname myapp_staging
+
+    # Copy schema only with extensions
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_schema \\
+        --schema-only --include-extensions
+
+    # Copy specific tables only
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_partial \\
+        --include-table users --include-table orders --include-table products
+
+    # Copy excluding temporary data
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_clean \\
+        --exclude-table temp_* --exclude-table cache_* --exclude-table session_*
+
+    # Copy with parallel processing and validation
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname myapp_copy \\
+        --jobs 4 --validate --progress
+
+    # Replace existing target database
+    $SCRIPT_NAME copy -H localhost -U postgres -d myapp --target-dbname existing_db \\
+        --drop-target --skip-confirmation
+
+EXIT CODES:
+    0  - Success
+    1  - General error
+    2  - Connection error  
+    3  - Target database already exists
+    4  - Copy operation failed
+    5  - Validation failed
+    6  - Timeout error
+
+EOF
+}
+
+show_version() {
+    echo "$SCRIPT_NAME v$SCRIPT_VERSION"
+}
+
+# Main function
+main() {
+    # Parse global options first
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --force)
+                FORCE=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit $EXIT_SUCCESS
+                ;;
+            copy|clone|help|version)
+                break
+                ;;
+            *)
+                log_error "Unknown global option: $1"
+                show_help
+                exit $EXIT_GENERAL_ERROR
+                ;;
+        esac
+    done
+
+    if [[ $# -eq 0 ]]; then
+        log_error "No command specified"
+        show_help
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    local command="$1"
+    shift
+
+    # Check prerequisites
+    if ! command -v psql &> /dev/null; then
+        log_error "PostgreSQL client (psql) is required but not installed"
+        log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if ! command -v pg_dump &> /dev/null; then
+        log_error "PostgreSQL dump utility (pg_dump) is required but not installed"
+        log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if ! command -v pg_restore &> /dev/null; then
+        log_error "PostgreSQL restore utility (pg_restore) is required but not installed"
+        log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Execute command
+    case "$command" in
+        copy)
+            cmd_copy "$@"
+            ;;
+        clone)
+            cmd_clone "$@"  
+            ;;
+        help)
+            show_help
+            ;;
+        version)
+            show_version
+            ;;
+        *)
+            log_error "Unknown command: $command"
+            show_help
+            exit $EXIT_GENERAL_ERROR
+            ;;
+    esac
+}
+
+# Execute main function
+main "$@" 
