@@ -7,14 +7,15 @@
 set -euo pipefail
 
 # Script metadata
-readonly SCRIPT_NAME=$(basename "$0")
+readonly SCRIPT_NAME
+SCRIPT_NAME=$(basename "$0")
 readonly SCRIPT_VERSION="1.0.0"
 readonly EXIT_SUCCESS=0
 readonly EXIT_GENERAL_ERROR=1
-readonly EXIT_INVALID_ARGS=2
+# readonly EXIT_INVALID_ARGS=2  # Future feature
 readonly EXIT_CONNECTION_ERROR=3
 readonly EXIT_PERMISSION_ERROR=4
-readonly EXIT_USER_ERROR=5
+# readonly EXIT_USER_ERROR=5    # Future feature
 
 # Cross-platform utility functions
 is_macos_with_gnu_tools() {
@@ -130,8 +131,7 @@ validate_numeric() {
 log_info() {
     local message="$1"
     local safe_message
-    local safe_message
-    local safe_message=$(sanitize_for_log "$message")
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${BLUE}[INFO]${NC} $safe_message" >&2
     fi
@@ -140,8 +140,7 @@ log_info() {
 log_success() {
     local message="$1"
     local safe_message
-    local safe_message
-    local safe_message=$(sanitize_for_log "$message")
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${GREEN}[SUCCESS]${NC} $safe_message" >&2
     fi
@@ -150,8 +149,7 @@ log_success() {
 log_warning() {
     local message="$1"
     local safe_message
-    local safe_message
-    local safe_message=$(sanitize_for_log "$message")
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${YELLOW}[WARNING]${NC} $safe_message" >&2
     fi
@@ -160,16 +158,14 @@ log_warning() {
 log_error() {
     local message="$1"
     local safe_message
-    local safe_message
-    local safe_message=$(sanitize_for_log "$message")
+    safe_message=$(sanitize_for_log "$message")
     echo -e "${RED}[ERROR]${NC} $safe_message" >&2
 }
 
 log_verbose() {
     local message="$1"
     local safe_message
-    local safe_message
-    local safe_message=$(sanitize_for_log "$message")
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$VERBOSE" == "true" && "$QUIET" != "true" ]]; then
         echo -e "${BLUE}[VERBOSE]${NC} $safe_message" >&2
     fi
@@ -633,13 +629,15 @@ execute_sql_with_output() {
 
 user_exists() {
     local username="$1"
-    local count=$(execute_sql_with_output "SELECT COUNT(*) FROM pg_roles WHERE rolname = '$username';" "Check if user exists")
+    local count
+    count=$(execute_sql_with_output "SELECT COUNT(*) FROM pg_roles WHERE rolname = '$username';" "Check if user exists")
     [[ "$count" -gt 0 ]]
 }
 
 database_exists() {
     local dbname="$1"
-    local count=$(execute_sql_with_output "SELECT COUNT(*) FROM pg_database WHERE datname = '$dbname';" "Check if database exists")
+    local count
+    count=$(execute_sql_with_output "SELECT COUNT(*) FROM pg_database WHERE datname = '$dbname';" "Check if database exists")
     [[ "$count" -gt 0 ]]
 }
 
@@ -1131,8 +1129,7 @@ cmd_grant_db_access() {
     # Grant table privileges if specified
     if [[ -n "$table_privileges" ]]; then
         local table_db_url
-        local table_db_url
-        local table_db_url=$(echo "$DATABASE_URL" | sed "s|/[^/]*$|/$target_db|")
+        table_db_url="${DATABASE_URL%/*}/$target_db"
 
         if [[ "$grant_all_tables" == "true" ]]; then
             if PGPASSWORD="${PGPASSWORD:-}" psql "$table_db_url" -c "GRANT $table_privileges ON ALL TABLES IN SCHEMA \"$schema\" TO \"$target_user\";" &>/dev/null; then
@@ -1203,7 +1200,7 @@ cmd_list_users() {
     fi
 
     printf "%-20s %-10s %-10s %-10s %-10s %-15s\n" "USERNAME" "SUPERUSER" "CREATEDB" "CREATEROLE" "LOGIN" "CONN_LIMIT"
-    printf "%-20s %-10s %-10s %-10s %-10s %-15s\n" "$(printf '%*s' 20 | tr ' ' '-')" "$(printf '%*s' 10 | tr ' ' '-')" "$(printf '%*s' 10 | tr ' ' '-')" "$(printf '%*s' 10 | tr ' ' '-')" "$(printf '%*s' 10 | tr ' ' '-')" "$(printf '%*s' 15 | tr ' ' '-')"
+    printf "%-20s %-10s %-10s %-10s %-10s %-15s\n" "$(printf '%*s' 20 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 15 '' | tr ' ' '-')"
 
     psql "$DATABASE_URL" -t -c "
         SELECT
@@ -1542,8 +1539,7 @@ cmd_revoke_access() {
     # Revoke table privileges
     if [[ -n "$table_privileges" && -n "$target_db" ]]; then
         local table_db_url
-        local table_db_url
-        local table_db_url=$(echo "$DATABASE_URL" | sed "s|/[^/]*$|/$target_db|")
+        table_db_url="${DATABASE_URL%/*}/$target_db"
         local target_schema="${schema:-public}"
 
         if [[ "$revoke_all_tables" == "true" ]]; then
@@ -1654,7 +1650,8 @@ cmd_show_user_permissions() {
     fi
 
     # Get basic user permissions
-    local user_info=$(psql "$DATABASE_URL" -t -c "
+    local user_info
+    user_info=$(psql "$DATABASE_URL" -t -c "
         SELECT
             rolsuper, rolcreatedb, rolcreaterole, rolcanlogin, rolconnlimit
         FROM pg_roles
@@ -1680,7 +1677,7 @@ cmd_show_user_permissions() {
         echo ""
         echo "=== Database Permissions ==="
         printf "%-20s %-30s\n" "DATABASE" "PRIVILEGES"
-        printf "%-20s %-30s\n" "$(printf '%*s' 20 | tr ' ' '-')" "$(printf '%*s' 30 | tr ' ' '-')"
+        printf "%-20s %-30s\n" "$(printf '%*s' 20 '' | tr ' ' '-')" "$(printf '%*s' 30 '' | tr ' ' '-')"
     fi
 
     # Show database permissions
@@ -1934,7 +1931,8 @@ cmd_terminate_user_connections() {
     log_info "Terminating active connections for user: $target_user"
 
     # Get current connection count
-    local connection_count=$(execute_sql_with_output "SELECT COUNT(*) FROM pg_stat_activity WHERE usename = '$target_user';" "Count user connections")
+    local connection_count
+    connection_count=$(execute_sql_with_output "SELECT COUNT(*) FROM pg_stat_activity WHERE usename = '$target_user';" "Count user connections")
 
     if [[ "$connection_count" -eq 0 ]]; then
         log_info "No active connections found for user '$target_user'"
@@ -2049,7 +2047,8 @@ EOF
     fi
 
     # Check if schema exists
-    local schema_exists=$(execute_sql_with_output "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '$target_schema';" "Check if schema exists")
+    local schema_exists
+    schema_exists=$(execute_sql_with_output "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '$target_schema';" "Check if schema exists")
     if [[ "$schema_exists" -eq 0 ]]; then
         log_error "Schema '$target_schema' does not exist"
         exit "$EXIT_GENERAL_ERROR"
@@ -2800,7 +2799,9 @@ EOF
 
     local grant_statements
     local grant_statements
-    local grant_statements=$(execute_sql_with_output "$roles_query" "Get role grant statements")
+    local grant_statements
+    local grant_statements
+    grant_statements=$(execute_sql_with_output "$roles_query" "Get role grant statements")
 
     if [[ -n "$grant_statements" && "$grant_statements" != "" ]]; then
         log_verbose "Copying role memberships..."
@@ -2895,7 +2896,9 @@ EOF
 
     local revoke_statements
     local revoke_statements
-    local revoke_statements=$(execute_sql_with_output "$revoke_roles_query" "Get role revoke statements")
+    local revoke_statements
+    local revoke_statements
+    revoke_statements=$(execute_sql_with_output "$revoke_roles_query" "Get role revoke statements")
 
     if [[ -n "$revoke_statements" && "$revoke_statements" != "" ]]; then
         log_verbose "Revoking role memberships..."
@@ -3250,7 +3253,9 @@ EOF
     local user_query="SELECT rolcanlogin, rolcreatedb, rolcreaterole, rolsuper FROM pg_roles WHERE rolname = '$target_user';"
     local user_attrs
     local user_attrs
-    local user_attrs=$(execute_sql_with_output "$user_query" "Get user attributes")
+    local user_attrs
+    local user_attrs
+    user_attrs=$(execute_sql_with_output "$user_query" "Get user attributes")
 
     IFS='|' read -r can_login can_create_db can_create_role is_superuser <<< "$user_attrs"
 
@@ -4416,7 +4421,9 @@ EOF
     # Format columns for SQL
     local formatted_columns
     local formatted_columns
-    local formatted_columns=$(echo "$target_columns" | sed 's/,/", "/g' | sed 's/^/"/' | sed 's/$/"/')
+    local formatted_columns
+    local formatted_columns
+    formatted_columns=$(echo "$target_columns" | sed 's/,/", "/g' | sed 's/^/"/' | sed 's/$/"/')
 
     if execute_sql "GRANT $privileges ($formatted_columns) ON \"$schema\".\"$target_table\" TO \"$target_user\";" "Grant column privileges"; then
         log_success "Granted $privileges on columns ($target_columns) of table '$schema.$target_table' to user '$target_user'"
@@ -4838,589 +4845,6 @@ EOF
     fi
 
     log_success "Security scan completed"
-}
-
-cmd_create_users_batch() {
-    local users_file=""
-
-    extract_global_options "$@"
-    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
-        set -- "${FILTERED_ARGS[@]}"
-    else
-        set --
-    fi
-
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
-                local consumed
-                if consumed=$(parse_connection_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown connection option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --ssl-mode|--ssl-cert|--ssl-key|--ssl-ca)
-                local consumed
-                if consumed=$(parse_ssl_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown SSL option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --users-file)
-                users_file="$2"
-                if [[ ! -f "$users_file" ]]; then
-                    log_error "Users file not found: $users_file"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                shift 2
-                ;;
-            --help)
-                cat << EOF
-$SCRIPT_NAME create-users-batch - Create multiple users from file
-
-USAGE:
-    $SCRIPT_NAME create-users-batch --users-file <file> [options]
-
-REQUIRED OPTIONS:
-    --users-file <file>         JSON file with user definitions
-
-FILE FORMAT:
-    [
-      {
-        "username": "user1",
-        "password": "password1",
-        "superuser": false,
-        "createdb": true,
-        "createrole": false,
-        "login": true
-      },
-      ...
-    ]
-
-EXAMPLES:
-    # Create users from JSON file
-    $SCRIPT_NAME create-users-batch -U postgres --users-file users.json
-
-EOF
-                exit 0
-                ;;
-            *)
-                log_error "Unknown create-users-batch option: $1"
-                exit "$EXIT_GENERAL_ERROR"
-                ;;
-        esac
-    done
-
-    if [[ -z "$users_file" ]]; then
-        log_error "Users file is required. Use --users-file option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    get_database_url
-    handle_password
-    setup_ssl_environment
-    test_database_connection
-
-    log_info "Creating users from file: $users_file"
-
-    # Simple JSON parsing for user creation
-    local user_count=0
-    while IFS= read -r line; do
-        if [[ "$line" =~ \"username\":[[:space:]]*\"([^\"]+)\" ]]; then
-            local username="${BASH_REMATCH[1]}"
-            user_count=$((user_count + 1))
-
-            # Extract password (simplified parsing)
-            local password=""
-            if [[ "$line" =~ \"password\":[[:space:]]*\"([^\"]+)\" ]]; then
-                password="${BASH_REMATCH[1]}"
-            fi
-
-            # Check for flags
-            local superuser_flag=""
-            local createdb_flag=""
-            local login_flag="LOGIN"
-
-            if [[ "$line" =~ \"superuser\":[[:space:]]*true ]]; then
-                superuser_flag="SUPERUSER"
-            else
-                superuser_flag="NOSUPERUSER"
-            fi
-
-            if [[ "$line" =~ \"createdb\":[[:space:]]*true ]]; then
-                createdb_flag="CREATEDB"
-            else
-                createdb_flag="NOCREATEDB"
-            fi
-
-            if [[ "$line" =~ \"login\":[[:space:]]*false ]]; then
-                login_flag="NOLOGIN"
-            fi
-
-            log_info "Creating user: $username"
-
-            if user_exists "$username"; then
-                log_warning "User '$username' already exists, skipping"
-                continue
-            fi
-
-            local create_sql="CREATE USER \"$username\""
-            if [[ -n "$password" ]]; then
-                create_sql="$create_sql WITH PASSWORD '$password'"
-            fi
-            create_sql="$create_sql $superuser_flag $createdb_flag $login_flag;"
-
-            if execute_sql "$create_sql" "Create user $username"; then
-                log_success "User '$username' created successfully"
-            else
-                log_error "Failed to create user '$username'"
-            fi
-        fi
-    done < "$users_file"
-
-    log_success "Batch user creation completed. Processed $user_count user(s)"
-}
-
-cmd_bulk_grant() {
-    local users_file=""
-    local target_db=""
-    local privileges=""
-
-    extract_global_options "$@"
-    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
-        set -- "${FILTERED_ARGS[@]}"
-    else
-        set --
-    fi
-
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
-                local consumed
-                if consumed=$(parse_connection_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown connection option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --ssl-mode|--ssl-cert|--ssl-key|--ssl-ca)
-                local consumed
-                if consumed=$(parse_ssl_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown SSL option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --users-file)
-                users_file="$2"
-                if [[ ! -f "$users_file" ]]; then
-                    log_error "Users file not found: $users_file"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                shift 2
-                ;;
-            --target-db)
-                validate_db_name "$2"
-                target_db="$2"
-                shift 2
-                ;;
-            --privileges)
-                privileges="$2"
-                shift 2
-                ;;
-            --help)
-                cat << EOF
-$SCRIPT_NAME bulk-grant - Grant permissions to multiple users
-
-USAGE:
-    $SCRIPT_NAME bulk-grant --users-file <file> --target-db <database> --privileges <privs> [options]
-
-REQUIRED OPTIONS:
-    --users-file <file>         File with usernames (one per line)
-    --target-db <database>      Database to grant access to
-    --privileges <privs>        Privileges to grant
-
-EXAMPLES:
-    # Grant database access to multiple users
-    $SCRIPT_NAME bulk-grant -U postgres --users-file users.txt --target-db myapp --privileges CONNECT,CREATE
-
-EOF
-                exit 0
-                ;;
-            *)
-                log_error "Unknown bulk-grant option: $1"
-                exit "$EXIT_GENERAL_ERROR"
-                ;;
-        esac
-    done
-
-    if [[ -z "$users_file" ]]; then
-        log_error "Users file is required. Use --users-file option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    if [[ -z "$target_db" ]]; then
-        log_error "Target database is required. Use --target-db option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    if [[ -z "$privileges" ]]; then
-        log_error "Privileges are required. Use --privileges option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    get_database_url
-    handle_password
-    setup_ssl_environment
-    test_database_connection
-
-    if ! database_exists "$target_db"; then
-        log_error "Database '$target_db' does not exist"
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    log_info "Granting permissions to multiple users from file: $users_file"
-
-    local granted_count=0
-    while IFS= read -r username; do
-        # Skip empty lines and comments
-        [[ -z "$username" || "$username" =~ ^[[:space:]]*# ]] && continue
-
-        username=$(echo "$username" | xargs)  # Trim whitespace
-
-        if ! user_exists "$username"; then
-            log_warning "User '$username' does not exist, skipping"
-            continue
-        fi
-
-        log_info "Granting $privileges on database '$target_db' to user '$username'"
-
-        if execute_sql "GRANT $privileges ON DATABASE \"$target_db\" TO \"$username\";" "Grant privileges to $username"; then
-            log_success "Granted privileges to user '$username'"
-            granted_count=$((granted_count + 1))
-        else
-            log_error "Failed to grant privileges to user '$username'"
-        fi
-    done < "$users_file"
-
-    log_success "Bulk grant completed. Granted privileges to $granted_count user(s)"
-}
-
-cmd_enable_rls() {
-    local target_table=""
-    local schema="public"
-
-    extract_global_options "$@"
-    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
-        set -- "${FILTERED_ARGS[@]}"
-    else
-        set --
-    fi
-
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
-                local consumed
-                if consumed=$(parse_connection_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown connection option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --ssl-mode|--ssl-cert|--ssl-key|--ssl-ca)
-                local consumed
-                if consumed=$(parse_ssl_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown SSL option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --target-table)
-                target_table=$(sanitize_string "$2")
-                shift 2
-                ;;
-            --schema)
-                schema=$(sanitize_string "$2")
-                shift 2
-                ;;
-            --help)
-                cat << EOF
-$SCRIPT_NAME enable-rls - Enable row-level security on table
-
-USAGE:
-    $SCRIPT_NAME enable-rls --target-table <table> [options]
-
-REQUIRED OPTIONS:
-    --target-table <table>      Table name to enable RLS on
-
-OPTIONAL OPTIONS:
-    --schema <name>            Schema name (default: public)
-
-EXAMPLES:
-    # Enable RLS on table
-    $SCRIPT_NAME enable-rls -U postgres --target-table users
-
-EOF
-                exit 0
-                ;;
-            *)
-                log_error "Unknown enable-rls option: $1"
-                exit "$EXIT_GENERAL_ERROR"
-                ;;
-        esac
-    done
-
-    if [[ -z "$target_table" ]]; then
-        log_error "Target table is required. Use --target-table option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    get_database_url
-    handle_password
-    setup_ssl_environment
-    test_database_connection
-
-    log_info "Enabling row-level security on table: $schema.$target_table"
-
-    if execute_sql "ALTER TABLE \"$schema\".\"$target_table\" ENABLE ROW LEVEL SECURITY;" "Enable RLS"; then
-        log_success "Row-level security enabled on table '$schema.$target_table'"
-    else
-        log_error "Failed to enable row-level security on table '$schema.$target_table'"
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-}
-
-cmd_disable_rls() {
-    local target_table=""
-    local schema="public"
-
-    extract_global_options "$@"
-    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
-        set -- "${FILTERED_ARGS[@]}"
-    else
-        set --
-    fi
-
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
-                local consumed
-                if consumed=$(parse_connection_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown connection option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --ssl-mode|--ssl-cert|--ssl-key|--ssl-ca)
-                local consumed
-                if consumed=$(parse_ssl_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown SSL option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --target-table)
-                target_table=$(sanitize_string "$2")
-                shift 2
-                ;;
-            --schema)
-                schema=$(sanitize_string "$2")
-                shift 2
-                ;;
-            --help)
-                cat << EOF
-$SCRIPT_NAME disable-rls - Disable row-level security on table
-
-USAGE:
-    $SCRIPT_NAME disable-rls --target-table <table> [options]
-
-REQUIRED OPTIONS:
-    --target-table <table>      Table name to disable RLS on
-
-OPTIONAL OPTIONS:
-    --schema <name>            Schema name (default: public)
-
-EXAMPLES:
-    # Disable RLS on table
-    $SCRIPT_NAME disable-rls -U postgres --target-table users
-
-EOF
-                exit 0
-                ;;
-            *)
-                log_error "Unknown disable-rls option: $1"
-                exit "$EXIT_GENERAL_ERROR"
-                ;;
-        esac
-    done
-
-    if [[ -z "$target_table" ]]; then
-        log_error "Target table is required. Use --target-table option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    get_database_url
-    handle_password
-    setup_ssl_environment
-    test_database_connection
-
-    log_info "Disabling row-level security on table: $schema.$target_table"
-
-    if execute_sql "ALTER TABLE \"$schema\".\"$target_table\" DISABLE ROW LEVEL SECURITY;" "Disable RLS"; then
-        log_success "Row-level security disabled on table '$schema.$target_table'"
-    else
-        log_error "Failed to disable row-level security on table '$schema.$target_table'"
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-}
-
-cmd_create_policy() {
-    local policy_name=""
-    local target_table=""
-    local policy_command="ALL"
-    local policy_using=""
-    local policy_check=""
-    local target_roles=""
-    local schema="public"
-
-    extract_global_options "$@"
-    if [[ ${#FILTERED_ARGS[@]} -gt 0 ]]; then
-        set -- "${FILTERED_ARGS[@]}"
-    else
-        set --
-    fi
-
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
-                local consumed
-                if consumed=$(parse_connection_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown connection option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --ssl-mode|--ssl-cert|--ssl-key|--ssl-ca)
-                local consumed
-                if consumed=$(parse_ssl_arguments "$1" "$2"); then
-                    shift "$consumed"
-                else
-                    log_error "Unknown SSL option: $1"
-                    exit "$EXIT_GENERAL_ERROR"
-                fi
-                ;;
-            --policy-name)
-                policy_name=$(sanitize_string "$2")
-                shift 2
-                ;;
-            --target-table)
-                target_table=$(sanitize_string "$2")
-                shift 2
-                ;;
-            --command)
-                policy_command="$2"
-                shift 2
-                ;;
-            --using)
-                policy_using="$2"
-                shift 2
-                ;;
-            --check)
-                policy_check="$2"
-                shift 2
-                ;;
-            --roles)
-                target_roles="$2"
-                shift 2
-                ;;
-            --schema)
-                schema=$(sanitize_string "$2")
-                shift 2
-                ;;
-            --help)
-                cat << EOF
-$SCRIPT_NAME create-policy - Create row-level security policy
-
-USAGE:
-    $SCRIPT_NAME create-policy --policy-name <name> --target-table <table> [options]
-
-REQUIRED OPTIONS:
-    --policy-name <name>        Policy name
-    --target-table <table>      Table name
-
-OPTIONAL OPTIONS:
-    --command <cmd>            Command type: ALL, SELECT, INSERT, UPDATE, DELETE (default: ALL)
-    --using <expr>             USING expression for SELECT/UPDATE/DELETE
-    --check <expr>             CHECK expression for INSERT/UPDATE
-    --roles <roles>            Comma-separated role names (default: PUBLIC)
-    --schema <name>            Schema name (default: public)
-
-EXAMPLES:
-    # Create policy for user to see only their own rows
-    $SCRIPT_NAME create-policy -U postgres --policy-name user_policy --target-table users --using "user_id = current_user_id()"
-
-EOF
-                exit 0
-                ;;
-            *)
-                log_error "Unknown create-policy option: $1"
-                exit "$EXIT_GENERAL_ERROR"
-                ;;
-        esac
-    done
-
-    if [[ -z "$policy_name" ]]; then
-        log_error "Policy name is required. Use --policy-name option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    if [[ -z "$target_table" ]]; then
-        log_error "Target table is required. Use --target-table option."
-        exit "$EXIT_GENERAL_ERROR"
-    fi
-
-    get_database_url
-    handle_password
-    setup_ssl_environment
-    test_database_connection
-
-    log_info "Creating policy '$policy_name' on table: $schema.$target_table"
-
-    local create_policy_sql="CREATE POLICY \"$policy_name\" ON \"$schema\".\"$target_table\""
-
-    if [[ -n "$target_roles" ]]; then
-        create_policy_sql="$create_policy_sql FOR $policy_command TO $target_roles"
-    else
-        create_policy_sql="$create_policy_sql FOR $policy_command"
-    fi
-
-    if [[ -n "$policy_using" ]]; then
-        create_policy_sql="$create_policy_sql USING ($policy_using)"
-    fi
-
-    if [[ -n "$policy_check" ]]; then
-        create_policy_sql="$create_policy_sql WITH CHECK ($policy_check)"
-    fi
-
-    create_policy_sql="$create_policy_sql;"
-
-    if execute_sql "$create_policy_sql" "Create RLS policy"; then
-        log_success "Policy '$policy_name' created successfully on table '$schema.$target_table'"
-    else
-        log_error "Failed to create policy '$policy_name'"
-        exit "$EXIT_GENERAL_ERROR"
-    fi
 }
 
 cmd_clone_user_permissions() {

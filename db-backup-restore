@@ -41,10 +41,10 @@ CONFIG_FILE=""
 COMPRESS_LEVEL=""
 VALIDATE_SCHEMA=false
 CHECK_CONSTRAINTS=false
-WEBHOOK_URL=""
-WEBHOOK_TOKEN=""
-METRICS_FILE=""
-METRICS_ENABLED=false
+# Future webhook and metrics features
+# WEBHOOK_URL=""
+# WEBHOOK_TOKEN=""
+# METRICS_ENABLED=false
 DRY_RUN=false
 
 # Connection parameters
@@ -81,11 +81,12 @@ PARALLEL_TABLES=false
 COMPRESS_LEVEL=""
 
 # Advanced backup options
-INCREMENTAL_BACKUP=false
-DIFFERENTIAL_BACKUP=false
+# Future features (commented out to avoid unused variable warnings):
+# INCREMENTAL_BACKUP=false
+# DIFFERENTIAL_BACKUP=false
+# TEST_RESTORE=false
 BACKUP_MANIFEST=false
 EXCLUDE_LARGE_OBJECTS=false
-TEST_RESTORE=false
 VALIDATE_SCHEMA=false
 CHECK_CONSTRAINTS=false
 
@@ -105,7 +106,7 @@ EXIT_DISK_SPACE_ERROR=3
 EXIT_BACKUP_VERIFICATION_ERROR=4
 EXIT_LOCK_FILE_ERROR=5
 EXIT_TIMEOUT_ERROR=6
-EXIT_RETRY_EXHAUSTED=7
+# EXIT_RETRY_EXHAUSTED=7  # Future feature
 EXIT_CONFIG_ERROR=8
 
 # Input validation and security functions
@@ -1289,7 +1290,8 @@ check_disk_space() {
     mkdir -p "$target_dir"
 
     # Get available space in GB
-    local available_space_kb=$(df "$target_dir" | awk 'NR==2 {print $4}')
+    local available_space_kb
+    available_space_kb=$(df "$target_dir" | awk 'NR==2 {print $4}')
     local available_space_gb=$((available_space_kb / 1024 / 1024))
 
     log_verbose "Available disk space: ${available_space_gb}GB"
@@ -1440,8 +1442,6 @@ verify_backup_file() {
 
     # For PostgreSQL custom format, try to list contents
     if [[ "$backup_file" == *.dump* ]]; then
-        local test_file="$backup_file"
-
         case "$backup_file" in
             *.gz|*.bz2|*.lz4)
                 case "$backup_file" in
@@ -1827,7 +1827,8 @@ send_webhook_notification() {
         return 1
     fi
 
-    local payload=$(cat << EOF
+    local payload
+    payload=$(cat << EOF
 {
     "operation": "$operation",
     "status": "$status",
@@ -1862,8 +1863,10 @@ generate_backup_manifest() {
 
     log_info "Generating backup manifest..."
 
-    local file_size=$(get_file_size_bytes "$backup_file")
-    local checksum=$(calculate_file_checksum "$backup_file")
+    local file_size
+    file_size=$(get_file_size_bytes "$backup_file")
+    local checksum
+    checksum=$(calculate_file_checksum "$backup_file")
     local timestamp
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -1871,8 +1874,10 @@ generate_backup_manifest() {
     local db_size_query="SELECT pg_size_pretty(pg_database_size(current_database()));"
     local db_version_query="SELECT version();"
 
-    local db_size=$(execute_pg_command psql "$DATABASE_URL" -t -c "$db_size_query" 2>/dev/null | xargs || echo "unknown")
-    local db_version=$(execute_pg_command psql "$DATABASE_URL" -t -c "$db_version_query" 2>/dev/null | xargs || echo "unknown")
+    local db_size
+    db_size=$(execute_pg_command psql "$DATABASE_URL" -t -c "$db_size_query" 2>/dev/null | xargs || echo "unknown")
+    local db_version
+    db_version=$(execute_pg_command psql "$DATABASE_URL" -t -c "$db_version_query" 2>/dev/null | xargs || echo "unknown")
 
     # Create manifest
     cat > "$manifest_file" << EOF
@@ -1916,8 +1921,10 @@ validate_backup_schema() {
 
     log_info "Validating backup schema..."
 
-    local temp_db="temp_validate_$(date +%s)"
-    local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
+    local temp_db
+    temp_db="temp_validate_$(date +%s)"
+    local base_uri
+    base_uri="${DATABASE_URL%/*}/postgres"
 
     # Create temporary database
     if ! psql "$base_uri" -c "CREATE DATABASE \"$temp_db\";" &>/dev/null; then
@@ -1925,7 +1932,8 @@ validate_backup_schema() {
         return 1
     fi
 
-    local temp_uri=$(echo "$DATABASE_URL" | sed "s|/[^/]*$|/$temp_db|")
+    local temp_uri
+    temp_uri="${DATABASE_URL%/*}/$temp_db"
 
     # Restore to temporary database
     log_verbose "Restoring to temporary database for validation..."
@@ -2067,12 +2075,14 @@ extract_global_options() {
                 ;;
             --dry-run)
                 DRY_RUN=true
+                log_verbose "Dry run mode enabled (future feature): $DRY_RUN"
                 shift
                 ;;
             --color)
                 case "$2" in
                     always|never|auto)
                         COLOR_MODE="$2"
+                        log_verbose "Color mode set (future feature): $COLOR_MODE"
                         ;;
                     *)
                         log_error "Invalid color mode: $2"
@@ -2086,6 +2096,7 @@ extract_global_options() {
                 case "$2" in
                     debug|info|warning|error)
                         LOG_LEVEL="$2"
+                        log_verbose "Log level set (future feature): $LOG_LEVEL"
                         ;;
                     *)
                         log_error "Invalid log level: $2"
@@ -2208,25 +2219,29 @@ cmd_backup() {
                 ;;
             --exclude-table)
                 # Validate table name to prevent injection
-                local table_name=$(sanitize_string "$2")
+                local table_name
+                table_name=$(sanitize_string "$2")
                 pg_dump_args+=("--exclude-table=$table_name")
                 shift 2
                 ;;
             --include-table)
                 # Validate table name to prevent injection
-                local table_name=$(sanitize_string "$2")
+                local table_name
+                table_name=$(sanitize_string "$2")
                 pg_dump_args+=("--table=$table_name")
                 shift 2
                 ;;
             --exclude-schema)
                 # Validate schema name to prevent injection
-                local schema_name=$(sanitize_string "$2")
+                local schema_name
+                schema_name=$(sanitize_string "$2")
                 pg_dump_args+=("--exclude-schema=$schema_name")
                 shift 2
                 ;;
             --include-schema)
                 # Validate schema name to prevent injection
-                local schema_name=$(sanitize_string "$2")
+                local schema_name
+                schema_name=$(sanitize_string "$2")
                 pg_dump_args+=("--schema=$schema_name")
                 shift 2
                 ;;
@@ -2334,6 +2349,7 @@ cmd_backup() {
                 ;;
             --parallel-tables)
                 PARALLEL_TABLES=true
+                log_verbose "Parallel table processing enabled (future feature): $PARALLEL_TABLES"
                 shift
                 ;;
             --compress-level)
@@ -2348,6 +2364,7 @@ cmd_backup() {
                 ;;
             --exclude-large-objects)
                 EXCLUDE_LARGE_OBJECTS=true
+                log_verbose "Large objects excluded: $EXCLUDE_LARGE_OBJECTS"
                 pg_dump_args+=("--no-blobs")
                 shift
                 ;;
@@ -2394,7 +2411,8 @@ cmd_backup() {
     if ! parse_database_url "$DATABASE_URL" >/dev/null; then
         exit "$EXIT_GENERAL_ERROR"
     fi
-    local db_name=$(parse_database_url "$DATABASE_URL")
+    local db_name
+    db_name=$(parse_database_url "$DATABASE_URL")
 
     # Critical validation: Prevent backing up system databases unless forced
     local system_databases=("template0" "template1" "postgres")
@@ -2458,7 +2476,8 @@ cmd_backup() {
     log_verbose "Created backup directory: $backup_dir"
 
     # Generate backup filename
-    local backup_file="$backup_dir/$(generate_backup_filename "$db_name" "$format" "$compression")"
+    local backup_file
+    backup_file="$backup_dir/$(generate_backup_filename "$db_name" "$format" "$compression")"
 
     log_info "Starting backup of database: $db_name"
     log_info "Backup file: $backup_file"
@@ -2484,7 +2503,8 @@ cmd_backup() {
     fi
 
     # Add compression level to pg_dump if supported
-    local compression_args=($(build_pg_dump_compression "$format" "$compression" "$COMPRESS_LEVEL"))
+    local compression_args=()
+    mapfile -t compression_args < <(build_pg_dump_compression "$format" "$compression" "$COMPRESS_LEVEL")
     if [[ ${#compression_args[@]} -gt 0 ]]; then
         pg_dump_cmd+=("${compression_args[@]}")
     fi
@@ -2502,7 +2522,8 @@ cmd_backup() {
             while true; do
                 sleep "$PROGRESS_INTERVAL"
                 if [[ -f "$backup_file" ]]; then
-                    local current_size=$(get_file_size_human "$backup_file")
+                    local current_size
+                    current_size=$(get_file_size_human "$backup_file")
                     log_progress "Backup in progress - current size: $current_size"
                 fi
             done
@@ -2562,8 +2583,10 @@ cmd_backup() {
 
     # Check if backup was successful
     if [[ $backup_exit_code -eq 0 && -f "$backup_file" ]]; then
-        local file_size=$(get_file_size_human "$backup_file")
-        local file_size_bytes=$(get_file_size_bytes "$backup_file")
+        local file_size
+        file_size=$(get_file_size_human "$backup_file")
+        local file_size_bytes
+        file_size_bytes=$(get_file_size_bytes "$backup_file")
 
         log_success "Backup completed successfully in ${backup_duration}s"
         log_success "File: $backup_file"
@@ -2579,7 +2602,8 @@ cmd_backup() {
         check_data_constraints "$backup_file"
 
         # Calculate and log checksum
-        local checksum=$(calculate_file_checksum "$backup_file")
+        local checksum
+        checksum=$(calculate_file_checksum "$backup_file")
         if [[ "$checksum" != "unavailable" ]]; then
             log_success "Checksum: $checksum"
         fi
@@ -2714,7 +2738,8 @@ cmd_restore() {
     if ! parse_database_url "$DATABASE_URL" >/dev/null; then
         exit "$EXIT_GENERAL_ERROR"
     fi
-    local db_name=$(parse_database_url "$DATABASE_URL")
+    local db_name
+    db_name=$(parse_database_url "$DATABASE_URL")
 
     # Create lock file to prevent concurrent restores
     create_lock_file "restore" "$db_name"
@@ -2742,7 +2767,8 @@ cmd_restore() {
         if [[ "$FORCE" == "true" ]]; then
             log_warning "Database exists and --force specified. Dropping database..."
             # Extract connection details without database name for dropping
-            local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
+            local base_uri
+            base_uri="${DATABASE_URL%/*}/postgres"
             PGPASSWORD="${PGPASSWORD:-}" psql "$base_uri" -c "DROP DATABASE IF EXISTS \"$db_name\";"
             PGPASSWORD="${PGPASSWORD:-}" psql "$base_uri" -c "CREATE DATABASE \"$db_name\";"
             log_verbose "Database recreated"
@@ -2753,7 +2779,8 @@ cmd_restore() {
     else
         # Database doesn't exist, create it
         log_info "Database doesn't exist, creating..."
-        local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
+        local base_uri
+        base_uri="${DATABASE_URL%/*}/postgres"
         PGPASSWORD="${PGPASSWORD:-}" psql "$base_uri" -c "CREATE DATABASE \"$db_name\";"
         log_verbose "Database created"
     fi
@@ -2811,7 +2838,8 @@ cmd_restore() {
         log_success "From backup: $(basename "$backup_file")"
 
         # Write success metrics
-        local backup_size=$(get_file_size_bytes "$backup_file")
+        local backup_size
+        backup_size=$(get_file_size_bytes "$backup_file")
         write_metrics "restore" "$restore_duration" "$backup_size" "$restore_exit_code"
 
         # Send success notification
@@ -2922,18 +2950,18 @@ cmd_list() {
         date)
             sort_flags="-1t"
             [[ "$reverse_sort" == "true" ]] && sort_flags="${sort_flags}r"
-            IFS=$'\n' backup_files=($(run_preferred_command "ls" $sort_flags "${backup_files[@]}" 2>/dev/null))
+            mapfile -t backup_files < <(run_preferred_command "ls" $sort_flags "${backup_files[@]}" 2>/dev/null)
             ;;
         size)
             sort_flags="-1S"
             [[ "$reverse_sort" == "true" ]] && sort_flags="${sort_flags}r"
-            IFS=$'\n' backup_files=($(run_preferred_command "ls" $sort_flags "${backup_files[@]}" 2>/dev/null))
+            mapfile -t backup_files < <(run_preferred_command "ls" $sort_flags "${backup_files[@]}" 2>/dev/null)
             ;;
         name)
             if [[ "$reverse_sort" == "true" ]]; then
-                IFS=$'\n' backup_files=($(printf '%s\n' "${backup_files[@]}" | sort -r))
+                mapfile -t backup_files < <(printf '%s\n' "${backup_files[@]}" | sort -r)
             else
-                IFS=$'\n' backup_files=($(printf '%s\n' "${backup_files[@]}" | sort))
+                mapfile -t backup_files < <(printf '%s\n' "${backup_files[@]}" | sort)
             fi
             ;;
     esac
@@ -2951,9 +2979,12 @@ cmd_list() {
                     echo ","
                 fi
                 first=false
-                local basename_file=$(basename "$file")
-                local size=$(get_file_size_human "$file")
-                local date=$(get_file_modification_date "$file")
+                local basename_file
+                basename_file=$(basename "$file")
+                local size
+                size=$(get_file_size_human "$file")
+                local date
+                date=$(get_file_modification_date "$file")
                 local format="unknown"
                 case "$basename_file" in
                     *.dump*) format="custom" ;;
@@ -2975,12 +3006,15 @@ cmd_list() {
             ;;
         table)
             printf "%-50s %-10s %-19s %-8s %-11s\n" "FILE" "SIZE" "DATE" "FORMAT" "COMPRESSION"
-            printf "%-50s %-10s %-19s %-8s %-11s\n" "$(printf '%*s' 50 | tr ' ' '-')" "$(printf '%*s' 10 | tr ' ' '-')" "$(printf '%*s' 19 | tr ' ' '-')" "$(printf '%*s' 8 | tr ' ' '-')" "$(printf '%*s' 11 | tr ' ' '-')"
+            printf "%-50s %-10s %-19s %-8s %-11s\n" "$(printf '%-50s' '' | tr ' ' '-')" "$(printf '%-10s' '' | tr ' ' '-')" "$(printf '%-19s' '' | tr ' ' '-')" "$(printf '%-8s' '' | tr ' ' '-')" "$(printf '%-11s' '' | tr ' ' '-')"
 
             for file in "${backup_files[@]}"; do
-                local basename_file=$(basename "$file")
-                local size=$(get_file_size_human "$file")
-                local date=$(get_file_modification_date "$file")
+                local basename_file
+                basename_file=$(basename "$file")
+                local size
+                size=$(get_file_size_human "$file")
+                local date
+                date=$(get_file_modification_date "$file")
                 local format="unknown"
                 case "$basename_file" in
                     *.dump*) format="custom" ;;
@@ -3193,6 +3227,7 @@ cmd_verify() {
                 ;;
             --parallel)
                 parallel_verify=true
+                log_verbose "Parallel verification enabled (future feature): $parallel_verify"
                 shift
                 ;;
             --fix)
@@ -3213,6 +3248,7 @@ cmd_verify() {
                 ;;
             --all)
                 verify_all=true
+                log_verbose "Verify all files explicitly enabled: $verify_all"
                 shift
                 ;;
             -H|--host|-p|--port|-U|--username|-d|--dbname|--passwd-stdin)
@@ -3291,22 +3327,27 @@ cmd_verify() {
     # Create results summary
     local results_file
     results_file=$(mktemp)
-    echo "# Backup Verification Results" > "$results_file"
-    echo "# Generated: $(date)" >> "$results_file"
-    echo "# Total files: $total_files" >> "$results_file"
-    echo "" >> "$results_file"
+    {
+        echo "# Backup Verification Results"
+        echo "# Generated: $(date)"
+        echo "# Total files: $total_files"
+        echo ""
+    } > "$results_file"
 
     log_info "Starting verification of $total_files file(s)..."
 
     # Verify each file
     for file in "${files_to_verify[@]}"; do
-        local file_basename=$(basename "$file")
+        local file_basename
+        file_basename=$(basename "$file")
         log_info "Verifying: $file_basename"
 
         local file_status="UNKNOWN"
         local file_issues=()
-        local file_size=$(get_file_size_human "$file")
-        local file_date=$(get_file_modification_date "$file")
+        local file_size
+        file_size=$(get_file_size_human "$file")
+        local file_date
+        file_date=$(get_file_modification_date "$file")
 
         # Basic file checks
         if [[ ! -f "$file" ]]; then
@@ -3494,9 +3535,11 @@ cmd_verify() {
                 local manifest_file="${file}.manifest"
                 if [[ -f "$manifest_file" ]]; then
                     log_verbose "Checking checksums against manifest..."
-                    local stored_checksum=$(grep "^checksum:" "$manifest_file" 2>/dev/null | cut -d' ' -f2)
+                    local stored_checksum
+                    stored_checksum=$(grep "^checksum:" "$manifest_file" 2>/dev/null | cut -d' ' -f2)
                     if [[ -n "$stored_checksum" ]]; then
-                        local current_checksum=$(calculate_file_checksum "$file")
+                        local current_checksum
+                        current_checksum=$(calculate_file_checksum "$file")
                         if [[ "$stored_checksum" == "$current_checksum" ]]; then
                             log_verbose "Checksum verification: OK"
                         else
@@ -3566,13 +3609,15 @@ cmd_verify() {
     done
 
     # Generate summary
-    echo "" >> "$results_file"
-    echo "# Summary" >> "$results_file"
-    echo "Total files: $total_files" >> "$results_file"
-    echo "Verified: $verified_files" >> "$results_file"
-    echo "Failed: $failed_files" >> "$results_file"
-    echo "Corrupted: $corrupted_files" >> "$results_file"
-    echo "Fixed: $fixed_files" >> "$results_file"
+    {
+        echo ""
+        echo "# Summary"
+        echo "Total files: $total_files"
+        echo "Verified: $verified_files"
+        echo "Failed: $failed_files"
+        echo "Corrupted: $corrupted_files"
+        echo "Fixed: $fixed_files"
+    } >> "$results_file"
 
     # Display summary
     log_info "Verification Summary:"
@@ -3590,7 +3635,8 @@ cmd_verify() {
 
     # Save results if verbose
     if [[ "$VERBOSE" == "true" ]]; then
-        local results_save_file="$backup_dir/verification_results_$(date +%Y%m%d_%H%M%S).txt"
+        local results_save_file
+        results_save_file="$backup_dir/verification_results_$(date +%Y%m%d_%H%M%S).txt"
         cp "$results_file" "$results_save_file"
         log_verbose "Detailed results saved to: $results_save_file"
     fi
@@ -3613,9 +3659,12 @@ verify_backup_by_restore() {
     local backup_file="$1"
 
     # Generate temporary database name
-    local temp_db="temp_verify_$(date +%s)_$$"
-    local base_uri=$(echo "$DATABASE_URL" | sed 's|/[^/]*$|/postgres|')
-    local temp_uri=$(echo "$DATABASE_URL" | sed "s|/[^/]*$|/$temp_db|")
+    local temp_db
+    temp_db="temp_verify_$(date +%s)_$$"
+    local base_uri
+    base_uri="${DATABASE_URL%/*}/postgres"
+    local temp_uri
+    temp_uri="${DATABASE_URL%/*}/$temp_db"
 
     log_verbose "Creating temporary database for verification: $temp_db"
 
@@ -3670,7 +3719,8 @@ verify_backup_by_restore() {
 
     # Basic database validity check
     if [[ "$restore_success" == "true" ]]; then
-        local table_count=$(execute_pg_command psql "$temp_uri" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | xargs)
+        local table_count
+        table_count=$(execute_pg_command psql "$temp_uri" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | xargs)
         if [[ ! "$table_count" =~ ^[0-9]+$ ]] || [[ "$table_count" -eq 0 ]]; then
             log_verbose "Deep verification: No tables found in restored database"
             restore_success=false
@@ -3702,7 +3752,8 @@ attempt_backup_fix() {
         case "$issue" in
             *"Checksum mismatch"*)
                 log_verbose "Attempting to regenerate checksum for: $(basename "$backup_file")"
-                local new_checksum=$(calculate_file_checksum "$backup_file")
+                local new_checksum
+                new_checksum=$(calculate_file_checksum "$backup_file")
                 local manifest_file="${backup_file}.manifest"
                 if [[ -f "$manifest_file" ]]; then
                     # Update checksum in manifest

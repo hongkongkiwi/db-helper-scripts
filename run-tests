@@ -338,7 +338,7 @@ run_test_suite() {
     fi
 
     local end_time
-    local end_time=$(date +%s)
+    end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
     # Parse test results
@@ -365,8 +365,9 @@ run_test_suite() {
         while IFS= read -r line; do
             if [[ $line =~ ^not\ ok ]]; then
                 local test_desc
-                local test_desc
-                test_desc=$(echo "$line" | sed 's/^not ok [0-9]* //')
+                # Remove "not ok " and any digits followed by space
+                test_desc="${line#not ok }"
+                test_desc="${test_desc#* }"
                 FAILED_TEST_NAMES+=("$test_name: $test_desc")
             fi
         done < "$test_results_file"
@@ -412,11 +413,11 @@ EOF
 
     # Analyze test files for feature coverage
     local backup_tests
-    local backup_tests=$(find "$TEST_DIR" -name "*backup*" -type f | wc -l)
+    backup_tests=$(find "$TEST_DIR" -name "*backup*" -type f | wc -l)
     local copy_tests
-    local copy_tests=$(find "$TEST_DIR" -name "*copy*" -type f | wc -l)
+    copy_tests=$(find "$TEST_DIR" -name "*copy*" -type f | wc -l)
     local user_tests
-    local user_tests=$(find "$TEST_DIR" -name "*user*" -type f | wc -l)
+    user_tests=$(find "$TEST_DIR" -name "*user*" -type f | wc -l)
 
     cat >> "$coverage_file" << EOF
 - Backup Tests: $backup_tests test files
@@ -445,9 +446,9 @@ EOF
 
 generate_json_report() {
     local current_time
-    local current_time=$(date +%s)
+    current_time=$(date +%s)
     local duration
-    local duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
+    duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
 
     cat << EOF
 {
@@ -522,7 +523,7 @@ retry_failed_tests() {
     # Run each failed test individually
     for failed_test in "${FAILED_TEST_NAMES[@]}"; do
         local test_suite
-        local test_suite=$(echo "$failed_test" | cut -d: -f1)
+        test_suite=$(echo "$failed_test" | cut -d: -f1)
         local test_file="$TEST_DIR/scripts/test_${test_suite}.bats"
 
         if [[ -f "$test_file" ]]; then
@@ -631,7 +632,6 @@ run_tests_in_docker() {
 }
 
 main() {
-    TEST_START_TIME=$(date)
     TEST_START_TIMESTAMP=$(date +%s)
 
     log_info "Database Helper Scripts Test Runner"
@@ -687,9 +687,9 @@ main() {
 
     # Final summary
     local current_time
-    local current_time=$(date +%s)
+    current_time=$(date +%s)
     local total_duration
-    local total_duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
+    total_duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
 
     echo
     log_info "=== FINAL TEST SUMMARY ==="

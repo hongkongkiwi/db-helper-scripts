@@ -70,11 +70,11 @@ SSL_CA=""
 SKIP_CONFIRMATION=false
 VALIDATE_COPY=false
 CONNECTION_TIMEOUT=30
-COPY_TIMEOUT=0  # 0 = no timeout
+# COPY_TIMEOUT=0  # Future feature: copy operation timeout
 
 # Logging options
 LOG_FILE=""
-USE_SYSLOG=false
+# USE_SYSLOG=false  # Future feature: syslog integration
 
 # Temporary files tracking for cleanup
 TEMP_FILES=()
@@ -86,15 +86,15 @@ EXIT_CONNECTION_ERROR=2
 EXIT_TARGET_EXISTS_ERROR=3
 EXIT_COPY_ERROR=4
 EXIT_VALIDATION_ERROR=5
-EXIT_TIMEOUT_ERROR=6
+# EXIT_TIMEOUT_ERROR=6  # Future feature: timeout support
 
-# Advanced performance options
+# Advanced performance options (future features)
 OPTIMIZE_PERFORMANCE=false
-CHECKPOINT_FREQUENCY=""
-MAINTENANCE_WORK_MEM=""
-WORK_MEM=""
-SHARED_BUFFERS=""
-WAL_LEVEL=""
+# CHECKPOINT_FREQUENCY=""  # Future feature
+# MAINTENANCE_WORK_MEM=""  # Future feature
+# WORK_MEM=""              # Future feature
+# SHARED_BUFFERS=""        # Future feature
+# WAL_LEVEL=""             # Future feature
 
 # Cross-platform utility functions
 is_macos_with_gnu_tools() {
@@ -192,7 +192,8 @@ validate_numeric() {
 # Logging functions
 log_info() {
     local message="$1"
-    local safe_message=$(sanitize_for_log "$message")
+    local safe_message
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${BLUE}[INFO]${NC} $safe_message" >&2
     fi
@@ -200,7 +201,8 @@ log_info() {
 
 log_success() {
     local message="$1"
-    local safe_message=$(sanitize_for_log "$message")
+    local safe_message
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${GREEN}[SUCCESS]${NC} $safe_message" >&2
     fi
@@ -208,7 +210,8 @@ log_success() {
 
 log_warning() {
     local message="$1"
-    local safe_message=$(sanitize_for_log "$message")
+    local safe_message
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${YELLOW}[WARNING]${NC} $safe_message" >&2
     fi
@@ -216,13 +219,15 @@ log_warning() {
 
 log_error() {
     local message="$1"
-    local safe_message=$(sanitize_for_log "$message")
+    local safe_message
+    safe_message=$(sanitize_for_log "$message")
     echo -e "${RED}[ERROR]${NC} $safe_message" >&2
 }
 
 log_verbose() {
     local message="$1"
-    local safe_message=$(sanitize_for_log "$message")
+    local safe_message
+    safe_message=$(sanitize_for_log "$message")
     if [[ "$VERBOSE" == "true" && "$QUIET" != "true" ]]; then
         echo -e "${BLUE}[VERBOSE]${NC} $safe_message" >&2
     fi
@@ -264,7 +269,7 @@ build_connection_string() {
         # Use DATABASE_URL but override specific parameters if provided
         conn_str="$DATABASE_URL"
         if [[ -n "$dbname" ]]; then
-            conn_str=$(echo "$conn_str" | sed "s|/[^/]*$|/$dbname|")
+            conn_str="${conn_str%/*}/$dbname"
         fi
     else
         # Build connection string from components
@@ -355,9 +360,11 @@ check_database_exists() {
     local dbname="$2"
 
     # Connect to default database to check if target exists
-    local base_conn=$(echo "$connection_string" | sed 's|/[^/]*$|/postgres|')
+    local base_conn
+    base_conn="${connection_string%/*}/postgres"
 
-    local exists=$(execute_pg_command psql "$base_conn" -t -c "SELECT 1 FROM pg_database WHERE datname='$dbname';" 2>/dev/null | xargs)
+    local exists
+    exists=$(execute_pg_command psql "$base_conn" -t -c "SELECT 1 FROM pg_database WHERE datname='$dbname';" 2>/dev/null | xargs)
 
     if [[ "$exists" == "1" ]]; then
         return 0
@@ -423,11 +430,14 @@ copy_using_template() {
     log_info "Using fast template-based copy (same server)"
 
     # Connect to default database to create target with template
-    local base_conn=$(echo "$target_conn" | sed 's|/[^/]*$|/postgres|')
+    local base_conn
+    base_conn="${target_conn%/*}/postgres"
 
     # Get source database encoding and collation for compatibility
-    local src_encoding=$(get_database_info "$src_conn" "encoding")
-    local src_collation=$(get_database_info "$src_conn" "collation")
+    local src_encoding
+    src_encoding=$(get_database_info "$src_conn" "encoding")
+    local src_collation
+    src_collation=$(get_database_info "$src_conn" "collation")
 
     log_verbose "Source database encoding: $src_encoding, collation: $src_collation"
 
@@ -457,8 +467,10 @@ sync_database() {
     log_info "Syncing existing database with source"
 
     # Get table lists for comparison
-    local src_tables=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
-    local target_tables=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
+    local src_tables
+    src_tables=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
+    local target_tables
+    target_tables=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
 
     log_verbose "Analyzing schema differences..."
 
@@ -530,7 +542,7 @@ optimize_database_performance() {
         "start")
             # Store original settings
             local original_settings
-    original_settings=$(mktemp)
+            original_settings=$(mktemp)
             TEMP_FILES+=("$original_settings")
 
             execute_pg_command psql "$connection_string" -t -c "SELECT name, setting FROM pg_settings WHERE name IN ('maintenance_work_mem', 'work_mem', 'checkpoint_completion_target', 'wal_buffers');" > "$original_settings"
@@ -576,8 +588,10 @@ copy_database() {
         target_db_exists=true
 
         # Get target database info for comparison
-        local target_size=$(get_database_info "$target_conn" "size")
-        local target_table_count=$(get_database_info "$target_conn" "table_count")
+        local target_size
+        target_size=$(get_database_info "$target_conn" "size")
+        local target_table_count
+        target_table_count=$(get_database_info "$target_conn" "table_count")
 
         log_warning "Target database '$TARGET_DB_NAME' already exists ($target_table_count tables, $target_size)"
 
@@ -630,8 +644,10 @@ copy_database() {
                 fi
 
                 # Get final target database info
-                local final_target_size=$(get_database_info "$target_conn" "size")
-                local final_target_table_count=$(get_database_info "$target_conn" "table_count")
+                local final_target_size
+                final_target_size=$(get_database_info "$target_conn" "size")
+                local final_target_table_count
+                final_target_table_count=$(get_database_info "$target_conn" "table_count")
                 log_info "Target database: $final_target_table_count tables, $final_target_size"
                 return 0
             else
@@ -646,8 +662,10 @@ copy_database() {
     test_connection "$target_conn" "target" || exit "$EXIT_CONNECTION_ERROR"
 
     # Get source database info
-    local src_size=$(get_database_info "$src_conn" "size")
-    local src_table_count=$(get_database_info "$src_conn" "table_count")
+    local src_size
+    src_size=$(get_database_info "$src_conn" "size")
+    local src_table_count
+    src_table_count=$(get_database_info "$src_conn" "table_count")
     log_info "Source database: $src_table_count tables, $src_size"
 
     # Apply performance optimizations
@@ -678,8 +696,10 @@ copy_database() {
     fi
 
     # Get target database info
-    local target_size=$(get_database_info "$target_conn" "size")
-    local target_table_count=$(get_database_info "$target_conn" "table_count")
+    local target_size
+    target_size=$(get_database_info "$target_conn" "size")
+    local target_table_count
+    target_table_count=$(get_database_info "$target_conn" "table_count")
     log_success "Database copy completed successfully"
     log_info "Target database: $target_table_count tables, $target_size"
 }
@@ -690,7 +710,8 @@ create_target_database() {
     log_info "Creating target database: $TARGET_DB_NAME"
 
     # Connect to default database to create target
-    local base_conn=$(echo "$target_conn" | sed 's|/[^/]*$|/postgres|')
+    local base_conn
+    base_conn="${target_conn%/*}/postgres"
 
     if ! execute_pg_command psql "$base_conn" -c "CREATE DATABASE \"$TARGET_DB_NAME\";" 2>/dev/null; then
         log_error "Failed to create target database: $TARGET_DB_NAME"
@@ -706,7 +727,8 @@ drop_target_database() {
     log_info "Dropping target database: $TARGET_DB_NAME"
 
     # Connect to default database to drop target
-    local base_conn=$(echo "$target_conn" | sed 's|/[^/]*$|/postgres|')
+    local base_conn
+    base_conn="${target_conn%/*}/postgres"
 
     # Terminate connections to target database
     execute_pg_command psql "$base_conn" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$TARGET_DB_NAME';" &>/dev/null || true
@@ -819,7 +841,8 @@ copy_full_database() {
         dump_options+=("--format=directory")
 
         # Create temporary directory for parallel dump
-        local temp_dir=$(mktemp -d)
+        local temp_dir
+        temp_dir=$(mktemp -d)
         TEMP_FILES+=("$temp_dir")
         temp_file="$temp_dir"
     fi
@@ -886,8 +909,10 @@ validate_copy_result() {
     local validation_errors=0
 
     # Compare table counts
-    local src_tables=$(get_database_info "$src_conn" "table_count")
-    local target_tables=$(get_database_info "$target_conn" "table_count")
+    local src_tables
+    src_tables=$(get_database_info "$src_conn" "table_count")
+    local target_tables
+    target_tables=$(get_database_info "$target_conn" "table_count")
 
     if [[ "$src_tables" != "$target_tables" ]]; then
         log_warning "Table count mismatch: source=$src_tables, target=$target_tables"
@@ -897,12 +922,15 @@ validate_copy_result() {
     fi
 
     # Compare database sizes
-    local src_size=$(get_database_info "$src_conn" "size")
-    local target_size=$(get_database_info "$target_conn" "size")
+    local src_size
+    src_size=$(get_database_info "$src_conn" "size")
+    local target_size
+    target_size=$(get_database_info "$target_conn" "size")
     log_verbose "Database sizes: source=$src_size, target=$target_size"
 
     # Get list of tables for detailed validation
-    local table_list=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
+    local table_list
+    table_list=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname NOT IN ('information_schema', 'pg_catalog') ORDER BY schemaname, tablename;" 2>/dev/null)
 
     # Validate row counts for each table
     log_verbose "Validating row counts for each table..."
@@ -910,8 +938,10 @@ validate_copy_result() {
         [[ -z "$table" ]] && continue
         table=$(echo "$table" | xargs)  # trim whitespace
 
-        local src_rows=$(get_database_info "$src_conn" "row_count" "$table")
-        local target_rows=$(get_database_info "$target_conn" "row_count" "$table")
+        local src_rows
+        src_rows=$(get_database_info "$src_conn" "row_count" "$table")
+        local target_rows
+        target_rows=$(get_database_info "$target_conn" "row_count" "$table")
 
         if [[ "$src_rows" != "$target_rows" ]]; then
             log_warning "Row count mismatch in table $table: source=$src_rows, target=$target_rows"
@@ -923,8 +953,10 @@ validate_copy_result() {
 
     # Validate schema structure
     log_verbose "Validating schema structure..."
-    local src_schema=$(execute_pg_command psql "$src_conn" -t -c "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null)
-    local target_schema=$(execute_pg_command psql "$target_conn" -t -c "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null)
+    local src_schema
+    src_schema=$(execute_pg_command psql "$src_conn" -t -c "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null)
+    local target_schema
+    target_schema=$(execute_pg_command psql "$target_conn" -t -c "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null)
 
     if [[ "$src_schema" != "$target_schema" ]]; then
         log_warning "Schema structure differences detected"
@@ -935,8 +967,10 @@ validate_copy_result() {
 
     # Validate indexes
     log_verbose "Validating indexes..."
-    local src_indexes=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY tablename, indexname;" 2>/dev/null)
-    local target_indexes=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY tablename, indexname;" 2>/dev/null)
+    local src_indexes
+    src_indexes=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY tablename, indexname;" 2>/dev/null)
+    local target_indexes
+    target_indexes=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY tablename, indexname;" 2>/dev/null)
 
     if [[ "$src_indexes" != "$target_indexes" ]]; then
         log_warning "Index differences detected"
@@ -947,8 +981,10 @@ validate_copy_result() {
 
     # Validate sequences
     log_verbose "Validating sequences..."
-    local src_sequences=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname = 'public' ORDER BY sequencename;" 2>/dev/null)
-    local target_sequences=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname = 'public' ORDER BY sequencename;" 2>/dev/null)
+    local src_sequences
+    src_sequences=$(execute_pg_command psql "$src_conn" -t -c "SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname = 'public' ORDER BY sequencename;" 2>/dev/null)
+    local target_sequences
+    target_sequences=$(execute_pg_command psql "$target_conn" -t -c "SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname = 'public' ORDER BY sequencename;" 2>/dev/null)
 
     if [[ "$src_sequences" != "$target_sequences" ]]; then
         log_warning "Sequence differences detected"
@@ -959,8 +995,10 @@ validate_copy_result() {
 
     # Validate constraints
     log_verbose "Validating constraints..."
-    local src_constraints=$(execute_pg_command psql "$src_conn" -t -c "SELECT conname, contype FROM pg_constraint WHERE connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public') ORDER BY conname;" 2>/dev/null)
-    local target_constraints=$(execute_pg_command psql "$target_conn" -t -c "SELECT conname, contype FROM pg_constraint WHERE connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public') ORDER BY conname;" 2>/dev/null)
+    local src_constraints
+    src_constraints=$(execute_pg_command psql "$src_conn" -t -c "SELECT conname, contype FROM pg_constraint WHERE connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public') ORDER BY conname;" 2>/dev/null)
+    local target_constraints
+    target_constraints=$(execute_pg_command psql "$target_conn" -t -c "SELECT conname, contype FROM pg_constraint WHERE connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public') ORDER BY conname;" 2>/dev/null)
 
     if [[ "$src_constraints" != "$target_constraints" ]]; then
         log_warning "Constraint differences detected"
@@ -1182,6 +1220,7 @@ cmd_copy() {
             # Progress and logging
             --progress)
                 SHOW_PROGRESS=true
+                log_verbose "Progress monitoring enabled (future feature): $SHOW_PROGRESS"
                 shift
                 ;;
             --progress-interval)
@@ -1191,6 +1230,7 @@ cmd_copy() {
                 ;;
             --log-file)
                 LOG_FILE="$2"
+                log_verbose "Log file specified (future feature): $LOG_FILE"
                 shift 2
                 ;;
             -h|--help)
@@ -1316,8 +1356,10 @@ cmd_copy() {
     fi
 
     # Build connection strings
-    local src_conn=$(build_connection_string "$SRC_DB_HOST" "$SRC_DB_PORT" "$SRC_DB_USER" "$SRC_DB_NAME" "$SRC_DB_PASSWORD")
-    local target_conn=$(build_connection_string "$TARGET_DB_HOST" "$TARGET_DB_PORT" "$TARGET_DB_USER" "$TARGET_DB_NAME" "$TARGET_DB_PASSWORD")
+    local src_conn
+    src_conn=$(build_connection_string "$SRC_DB_HOST" "$SRC_DB_PORT" "$SRC_DB_USER" "$SRC_DB_NAME" "$SRC_DB_PASSWORD")
+    local target_conn
+    target_conn=$(build_connection_string "$TARGET_DB_HOST" "$TARGET_DB_PORT" "$TARGET_DB_USER" "$TARGET_DB_NAME" "$TARGET_DB_PASSWORD")
 
     # Perform the copy
     copy_database "$src_conn" "$target_conn"
