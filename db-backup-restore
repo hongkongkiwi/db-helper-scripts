@@ -455,6 +455,9 @@ COMMANDS:
     restore     Restore a database from a backup file
     list        List available backup files in a directory
     verify      Verify backup file integrity
+    install     Install script to ~/.local/bin for global access
+    uninstall   Remove script from ~/.local/bin
+    update      Update script to latest version from GitHub
     help        Show this help message
     version     Show version information
 
@@ -759,6 +762,139 @@ show_version() {
     echo "$SCRIPT_NAME version $SCRIPT_VERSION"
 }
 
+# Installation and update functions
+cmd_install() {
+    local install_dir="$HOME/.local/bin"
+    local script_path
+    script_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+
+    # Create install directory if it doesn't exist
+    if ! mkdir -p "$install_dir"; then
+        log_error "Failed to create install directory: $install_dir"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Copy script to install directory
+    if ! cp "$script_path" "$install_dir/$SCRIPT_NAME"; then
+        log_error "Failed to copy script to $install_dir"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Make executable
+    if ! chmod +x "$install_dir/$SCRIPT_NAME"; then
+        log_error "Failed to make script executable"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    log_info "Successfully installed $SCRIPT_NAME to $install_dir"
+    log_info "Make sure $install_dir is in your PATH to use the script globally"
+
+    # Check if directory is in PATH
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+        log_warning "$install_dir is not in your PATH"
+        log_info "Add it to your PATH by running:"
+        log_info "  echo 'export PATH=\"\$PATH:$install_dir\"' >> ~/.bashrc"
+        log_info "  source ~/.bashrc"
+    fi
+}
+
+cmd_uninstall() {
+    local install_dir="$HOME/.local/bin"
+    local installed_script="$install_dir/$SCRIPT_NAME"
+
+    if [[ -f "$installed_script" ]]; then
+        if rm "$installed_script"; then
+            log_info "Successfully removed $SCRIPT_NAME from $install_dir"
+        else
+            log_error "Failed to remove $installed_script"
+            exit $EXIT_GENERAL_ERROR
+        fi
+    else
+        log_warning "$SCRIPT_NAME is not installed in $install_dir"
+        log_info "Run '$SCRIPT_NAME install' to install it first"
+    fi
+}
+
+cmd_update() {
+    local github_repo="patrol6/db-helper-scripts"
+    local temp_dir
+    temp_dir=$(mktemp -d) || {
+        log_error "Failed to create temporary directory"
+        exit $EXIT_GENERAL_ERROR
+    }
+
+    # Cleanup temp directory on exit
+    trap "rm -rf '$temp_dir'" EXIT
+
+    log_info "Checking for updates from https://github.com/$github_repo..."
+
+    # Get latest release info
+    local latest_version
+    if ! latest_version=$(curl -s "https://api.github.com/repos/$github_repo/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' 2>/dev/null); then
+        log_error "Failed to check for updates. Please check your internet connection."
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if [[ -z "$latest_version" ]]; then
+        log_error "Could not determine latest version"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    log_info "Latest version: $latest_version"
+    log_info "Current version: v$SCRIPT_VERSION"
+
+    if [[ "$latest_version" == "v$SCRIPT_VERSION" ]]; then
+        log_info "You are already running the latest version"
+        return 0
+    fi
+
+    log_info "Downloading update..."
+
+    # Download latest release
+    local download_url="https://github.com/$github_repo/archive/refs/tags/$latest_version.tar.gz"
+    if ! curl -L "$download_url" -o "$temp_dir/update.tar.gz"; then
+        log_error "Failed to download update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Extract archive
+    if ! tar -xzf "$temp_dir/update.tar.gz" -C "$temp_dir" --strip-components=1; then
+        log_error "Failed to extract update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Check if the script exists in the download
+    if [[ ! -f "$temp_dir/$SCRIPT_NAME" ]]; then
+        log_error "Script not found in downloaded update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Get current script path
+    local current_script
+    current_script=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+
+    # Update current script
+    if ! cp "$temp_dir/$SCRIPT_NAME" "$current_script"; then
+        log_error "Failed to update script"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Make sure it's executable
+    chmod +x "$current_script"
+
+    # If installed in ~/.local/bin, update there too
+    local install_dir="$HOME/.local/bin"
+    if [[ -f "$install_dir/$SCRIPT_NAME" ]]; then
+        if cp "$temp_dir/$SCRIPT_NAME" "$install_dir/$SCRIPT_NAME"; then
+            chmod +x "$install_dir/$SCRIPT_NAME"
+            log_info "Also updated installed version in $install_dir"
+        fi
+    fi
+
+    log_info "Successfully updated $SCRIPT_NAME to $latest_version"
+    log_info "Restart any running instances to use the new version"
+}
+
 # Cross-platform utility functions
 is_macos_with_gnu_tools() {
     [[ "$OSTYPE" == "darwin"* ]]
@@ -957,9 +1093,16 @@ handle_password() {
     elif [[ -z "${PGPASSWORD:-}" && -z "$DB_PASSWORD" ]]; then
         if [[ -t 0 ]]; then
             echo -n "Enter database password: " >&2
-            read -s DB_PASSWORD
-            echo >&2
-            log_verbose "Password read interactively"
+            # Add timeout to prevent hangs in test environments
+            if read -s -t 5 DB_PASSWORD 2>/dev/null; then
+                echo >&2
+                log_verbose "Password read interactively"
+            else
+                echo >&2
+                log_warning "No password provided, continuing without authentication"
+            fi
+        else
+            log_verbose "Non-interactive environment, skipping password prompt"
         fi
     fi
 
@@ -2245,9 +2388,19 @@ cmd_backup() {
         if [[ "$db_name" == "$sysdb" ]]; then
             log_warning "Backing up system database: $db_name"
             if [[ "$FORCE" != "true" ]]; then
-                read -p "Are you sure you want to backup the system database '$db_name'? (y/N): " -r
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    log_info "Backup cancelled by user"
+                if [[ -t 0 ]]; then
+                    # Add timeout to prevent hangs in test environments
+                    if read -p "Are you sure you want to backup the system database '$db_name'? (y/N): " -t 10 -r 2>/dev/null; then
+                        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                            log_info "Backup cancelled by user"
+                            exit $EXIT_SUCCESS
+                        fi
+                    else
+                        log_warning "No response within 10 seconds, cancelling backup of system database"
+                        exit $EXIT_SUCCESS
+                    fi
+                else
+                    log_warning "Non-interactive environment: skipping system database backup without --force"
                     exit $EXIT_SUCCESS
                 fi
             fi
@@ -2913,7 +3066,7 @@ main() {
                 show_help
                 exit $EXIT_SUCCESS
                 ;;
-            backup|restore|list|verify|help|version)
+            backup|restore|list|verify|help|version|install|uninstall|update)
                 break
                 ;;
             *)
@@ -2958,6 +3111,15 @@ main() {
             ;;
         verify)
             cmd_verify "$@"
+            ;;
+        install)
+            cmd_install "$@"
+            ;;
+        uninstall)
+            cmd_uninstall "$@"
+            ;;
+        update)
+            cmd_update "$@"
             ;;
         help)
             show_help

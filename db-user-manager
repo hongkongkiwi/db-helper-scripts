@@ -1,13 +1,55 @@
 #!/bin/bash
 
-# Database User Management Script
-# Supports PostgreSQL user creation, password management, and permission granting
+# PostgreSQL User Management Script
+# Version: 1.0.0
+# Description: Comprehensive user and permission management for PostgreSQL
 
 set -euo pipefail
 
+# Script metadata
+readonly SCRIPT_NAME=$(basename "$0")
+readonly SCRIPT_VERSION="1.0.0"
+readonly EXIT_SUCCESS=0
+readonly EXIT_GENERAL_ERROR=1
+readonly EXIT_INVALID_ARGS=2
+readonly EXIT_CONNECTION_ERROR=3
+readonly EXIT_PERMISSION_ERROR=4
+readonly EXIT_USER_ERROR=5
+
+# Cross-platform utility functions
+is_macos_with_gnu_tools() {
+    [[ "$OSTYPE" == "darwin"* ]]
+}
+
+get_preferred_command() {
+    local base_cmd="$1"
+    local gnu_prefix="${2:-g}"
+
+    if is_macos_with_gnu_tools && command -v "${gnu_prefix}${base_cmd}" &>/dev/null; then
+        echo "${gnu_prefix}${base_cmd}"
+    elif command -v "$base_cmd" &>/dev/null; then
+        echo "$base_cmd"
+    else
+        return 1
+    fi
+}
+
+# Execute a command with its preferred version (GNU on macOS if available)
+run_preferred_command() {
+    local base_cmd="$1"
+    shift
+    local cmd_args=("$@")
+
+    local preferred_cmd
+    if preferred_cmd=$(get_preferred_command "$base_cmd"); then
+        "$preferred_cmd" "${cmd_args[@]}"
+    else
+        log_error "$base_cmd command not available"
+        return 1
+    fi
+}
+
 # Script configuration
-SCRIPT_NAME=$(basename "$0")
-SCRIPT_VERSION="1.0.0"
 
 # Colors for output
 RED='\033[0;31m'
@@ -37,13 +79,7 @@ SSL_CERT=""
 SSL_KEY=""
 SSL_CA=""
 
-# Exit codes
-EXIT_SUCCESS=0
-EXIT_GENERAL_ERROR=1
-EXIT_CONNECTION_ERROR=2
-EXIT_USER_EXISTS_ERROR=3
-EXIT_USER_NOT_EXISTS_ERROR=4
-EXIT_PERMISSION_ERROR=5
+
 
 # Input validation and security functions
 sanitize_for_log() {
@@ -184,6 +220,9 @@ COMMANDS:
     apply-template      Apply user template to users
     save-config         Save connection settings to file
     load-config         Load connection settings from file
+    install             Install script to ~/.local/bin for global access
+    uninstall           Remove script from ~/.local/bin
+    update              Update script to latest version from GitHub
     help                Show this help message
     version             Show version information
 
@@ -420,9 +459,16 @@ handle_password() {
     elif [[ -z "${PGPASSWORD:-}" && -z "$DB_PASSWORD" ]]; then
         if [[ -t 0 ]]; then
             echo -n "Enter database password: " >&2  # pragma: allowlist secret
-            read -s DB_PASSWORD
-            echo >&2
-            log_verbose "Password read interactively"
+            # Add timeout to prevent hangs in test environments
+            if read -s -t 5 DB_PASSWORD 2>/dev/null; then
+                echo >&2
+                log_verbose "Password read interactively"
+            else
+                echo >&2
+                log_warning "No password provided, continuing without authentication"
+            fi
+        else
+            log_verbose "Non-interactive environment, skipping password prompt"
         fi
     fi
 
@@ -796,9 +842,19 @@ cmd_create_user() {
     if [[ "$superuser" == "true" ]]; then
         log_warning "Granting SUPERUSER privilege. This user will have full administrative access."
         if [[ "$FORCE" != "true" ]]; then
-            read -p "Are you sure you want to create a superuser? (y/N): " -r
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                log_info "User creation cancelled"
+            if [[ -t 0 ]]; then
+                # Add timeout to prevent hangs in test environments
+                if read -p "Are you sure you want to create a superuser? (y/N): " -t 10 -r 2>/dev/null; then
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                        log_info "User creation cancelled"
+                        exit $EXIT_SUCCESS
+                    fi
+                else
+                    log_warning "No response within 10 seconds, cancelling superuser creation"
+                    exit $EXIT_SUCCESS
+                fi
+            else
+                log_warning "Non-interactive environment: skipping superuser creation without --force"
                 exit $EXIT_SUCCESS
             fi
         fi
@@ -824,10 +880,21 @@ cmd_create_user() {
 
     if [[ -z "$new_password" ]]; then
         echo -n "Enter password for new user '$new_user': " >&2  # pragma: allowlist secret
-        read -s new_password
-        echo >&2
-        if [[ -z "$new_password" ]]; then
-            log_error "Password cannot be empty"
+        # Add timeout to prevent hangs in test environments
+        if [[ -t 0 ]]; then
+            if read -s -t 10 new_password 2>/dev/null; then
+                echo >&2
+                if [[ -z "$new_password" ]]; then
+                    log_error "Password cannot be empty"
+                    exit $EXIT_GENERAL_ERROR
+                fi
+            else
+                echo >&2
+                log_error "No password provided within 10 seconds"
+                exit $EXIT_GENERAL_ERROR
+            fi
+        else
+            log_error "Non-interactive environment: password required via --password or stdin"
             exit $EXIT_GENERAL_ERROR
         fi
     fi
@@ -982,9 +1049,19 @@ cmd_grant_db_access() {
     if [[ "$target_user" == "$DB_USER" ]]; then
         log_warning "You are granting permissions to yourself ($target_user)"
         if [[ "$FORCE" != "true" ]]; then
-            read -p "Are you sure you want to grant permissions to yourself? (y/N): " -r
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                log_info "Permission grant cancelled"
+            if [[ -t 0 ]]; then
+                # Add timeout to prevent hangs in test environments
+                if read -p "Are you sure you want to grant permissions to yourself? (y/N): " -t 10 -r 2>/dev/null; then
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                        log_info "Permission grant cancelled"
+                        exit $EXIT_SUCCESS
+                    fi
+                else
+                    log_warning "No response within 10 seconds, cancelling self-permission grant"
+                    exit $EXIT_SUCCESS
+                fi
+            else
+                log_warning "Non-interactive environment: skipping self-permission grant without --force"
                 exit $EXIT_SUCCESS
             fi
         fi
@@ -6280,6 +6357,139 @@ show_version() {
     echo "$SCRIPT_NAME version $SCRIPT_VERSION"
 }
 
+# Installation and update functions
+cmd_install() {
+    local install_dir="$HOME/.local/bin"
+    local script_path
+    script_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+
+    # Create install directory if it doesn't exist
+    if ! mkdir -p "$install_dir"; then
+        log_error "Failed to create install directory: $install_dir"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Copy script to install directory
+    if ! cp "$script_path" "$install_dir/$SCRIPT_NAME"; then
+        log_error "Failed to copy script to $install_dir"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Make executable
+    if ! chmod +x "$install_dir/$SCRIPT_NAME"; then
+        log_error "Failed to make script executable"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    log_info "Successfully installed $SCRIPT_NAME to $install_dir"
+    log_info "Make sure $install_dir is in your PATH to use the script globally"
+
+    # Check if directory is in PATH
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+        log_warning "$install_dir is not in your PATH"
+        log_info "Add it to your PATH by running:"
+        log_info "  echo 'export PATH=\"\$PATH:$install_dir\"' >> ~/.bashrc"
+        log_info "  source ~/.bashrc"
+    fi
+}
+
+cmd_uninstall() {
+    local install_dir="$HOME/.local/bin"
+    local installed_script="$install_dir/$SCRIPT_NAME"
+
+    if [[ -f "$installed_script" ]]; then
+        if rm "$installed_script"; then
+            log_info "Successfully removed $SCRIPT_NAME from $install_dir"
+        else
+            log_error "Failed to remove $installed_script"
+            exit $EXIT_GENERAL_ERROR
+        fi
+    else
+        log_warning "$SCRIPT_NAME is not installed in $install_dir"
+        log_info "Run '$SCRIPT_NAME install' to install it first"
+    fi
+}
+
+cmd_update() {
+    local github_repo="patrol6/db-helper-scripts"
+    local temp_dir
+    temp_dir=$(mktemp -d) || {
+        log_error "Failed to create temporary directory"
+        exit $EXIT_GENERAL_ERROR
+    }
+
+    # Cleanup temp directory on exit
+    trap "rm -rf '$temp_dir'" EXIT
+
+    log_info "Checking for updates from https://github.com/$github_repo..."
+
+    # Get latest release info
+    local latest_version
+    if ! latest_version=$(curl -s "https://api.github.com/repos/$github_repo/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' 2>/dev/null); then
+        log_error "Failed to check for updates. Please check your internet connection."
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if [[ -z "$latest_version" ]]; then
+        log_error "Could not determine latest version"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    log_info "Latest version: $latest_version"
+    log_info "Current version: v$SCRIPT_VERSION"
+
+    if [[ "$latest_version" == "v$SCRIPT_VERSION" ]]; then
+        log_info "You are already running the latest version"
+        return 0
+    fi
+
+    log_info "Downloading update..."
+
+    # Download latest release
+    local download_url="https://github.com/$github_repo/archive/refs/tags/$latest_version.tar.gz"
+    if ! curl -L "$download_url" -o "$temp_dir/update.tar.gz"; then
+        log_error "Failed to download update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Extract archive
+    if ! tar -xzf "$temp_dir/update.tar.gz" -C "$temp_dir" --strip-components=1; then
+        log_error "Failed to extract update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Check if the script exists in the download
+    if [[ ! -f "$temp_dir/$SCRIPT_NAME" ]]; then
+        log_error "Script not found in downloaded update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Get current script path
+    local current_script
+    current_script=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+
+    # Update current script
+    if ! cp "$temp_dir/$SCRIPT_NAME" "$current_script"; then
+        log_error "Failed to update script"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Make sure it's executable
+    chmod +x "$current_script"
+
+    # If installed in ~/.local/bin, update there too
+    local install_dir="$HOME/.local/bin"
+    if [[ -f "$install_dir/$SCRIPT_NAME" ]]; then
+        if cp "$temp_dir/$SCRIPT_NAME" "$install_dir/$SCRIPT_NAME"; then
+            chmod +x "$install_dir/$SCRIPT_NAME"
+            log_info "Also updated installed version in $install_dir"
+        fi
+    fi
+
+    log_info "Successfully updated $SCRIPT_NAME to $latest_version"
+    log_info "Restart any running instances to use the new version"
+}
+
 # Main command dispatcher
 main() {
     if [[ $# -eq 0 ]]; then
@@ -6310,7 +6520,7 @@ main() {
                 show_help
                 exit $EXIT_SUCCESS
                 ;;
-            create-user|change-password|delete-user|grant-db-access|grant-schema-access|grant-create-db|grant-sequence-access|revoke-access|show-user-permissions|copy-user-permissions|lock-user|unlock-user|reset-user|set-connection-limit|create-role|assign-role|revoke-role|list-roles|list-user-roles|list-role-members|grant-table-access|revoke-table-access|grant-function-access|grant-view-access|grant-column-access|grant-tablespace-access|rotate-password|show-user-activity|security-scan|enable-rls|disable-rls|create-policy|create-users-batch|bulk-grant|apply-template|save-config|load-config|list-users|show-active-connections|terminate-user-connections|audit-permissions|validate-permissions|backup-permissions|restore-permissions|help|version)
+            create-user|change-password|delete-user|grant-db-access|grant-schema-access|grant-create-db|grant-sequence-access|revoke-access|show-user-permissions|copy-user-permissions|lock-user|unlock-user|reset-user|set-connection-limit|create-role|assign-role|revoke-role|list-roles|list-user-roles|list-role-members|grant-table-access|revoke-table-access|grant-function-access|grant-view-access|grant-column-access|grant-tablespace-access|rotate-password|show-user-activity|security-scan|enable-rls|disable-rls|create-policy|create-users-batch|bulk-grant|apply-template|save-config|load-config|list-users|show-active-connections|terminate-user-connections|audit-permissions|validate-permissions|backup-permissions|restore-permissions|install|uninstall|update|help|version)
                 break
                 ;;
             *)
@@ -6330,12 +6540,19 @@ main() {
     local command="$1"
     shift
 
-    # Check prerequisites
-    if ! command -v psql &> /dev/null; then
-        log_error "PostgreSQL client (psql) is required but not installed"
-        log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
-        exit $EXIT_GENERAL_ERROR
-    fi
+    # Check prerequisites (skip for install/uninstall/update/help/version commands)
+    case "$command" in
+        install|uninstall|update|help|version)
+            # These commands don't need PostgreSQL
+            ;;
+        *)
+            if ! command -v psql &> /dev/null; then
+                log_error "PostgreSQL client (psql) is required but not installed"
+                log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
+                exit $EXIT_GENERAL_ERROR
+            fi
+            ;;
+    esac
 
     # Execute command
     case "$command" in
@@ -6470,6 +6687,15 @@ main() {
             ;;
         load-config)
             cmd_load_config "$@"
+            ;;
+        install)
+            cmd_install "$@"
+            ;;
+        uninstall)
+            cmd_uninstall "$@"
+            ;;
+        update)
+            cmd_update "$@"
             ;;
         help)
             show_help

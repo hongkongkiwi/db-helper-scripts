@@ -233,13 +233,13 @@ tests/
 The test suite creates a multi-container Docker environment:
 
 1. **Primary PostgreSQL** (`postgres-primary`)
-   - Port: 5432
+   - Port: 15432
    - Database: `testdb`
    - User: `testuser`
    - Pre-loaded with test data
 
 2. **Secondary PostgreSQL** (`postgres-secondary`)
-   - Port: 5433
+   - Port: 15433
    - Database: `testdb2`
    - User: `testuser2`
    - Used for cross-server testing
@@ -369,14 +369,14 @@ Tests use these environment variables (automatically set):
 ```bash
 # Primary database
 TEST_HOST_PRIMARY="localhost"
-TEST_PORT_PRIMARY="5432"
+TEST_PORT_PRIMARY="15432"
 TEST_USER_PRIMARY="testuser"
 TEST_PASS_PRIMARY="testpass"
 TEST_DB_PRIMARY="testdb"
 
 # Secondary database
 TEST_HOST_SECONDARY="localhost"
-TEST_PORT_SECONDARY="5433"
+TEST_PORT_SECONDARY="15433"
 TEST_USER_SECONDARY="testuser2"
 TEST_PASS_SECONDARY="testpass2"
 TEST_DB_SECONDARY="testdb2"
@@ -408,9 +408,13 @@ You can customize the test environment by:
 
 2. **Port conflicts**
    ```bash
-   # Check what's using ports 5432/5433
-   lsof -i :5432
-   lsof -i :5433
+   # Check what's using ports 15432/15433 (test databases)
+lsof -i :15432
+lsof -i :15433
+
+# Check standard PostgreSQL ports (might conflict)
+lsof -i :5432
+lsof -i :5433
 
    # Stop conflicting services
    sudo systemctl stop postgresql

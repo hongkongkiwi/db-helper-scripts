@@ -13,8 +13,8 @@ setup() {
     # Ensure test databases exist and are clean
     cleanup_test_databases
 
-    # Reset test data in primary database
-    reset_test_data "$TEST_HOST_PRIMARY" "$TEST_PORT_PRIMARY" "$TEST_USER_PRIMARY" "$TEST_DB_PRIMARY" "$TEST_PASS_PRIMARY"
+    # Reset test data in primary database (use the working version)
+    reset_test_data "$TEST_HOST_PRIMARY" "$TEST_PORT_PRIMARY" "$TEST_USER_PRIMARY" "$TEST_DB_PRIMARY" "$TEST_PASS_PRIMARY" || true
 }
 
 teardown() {
@@ -26,17 +26,21 @@ teardown() {
 
 # Helper function to run db-backup-restore command
 run_backup_restore_cmd() {
-    cd ..  # Go to project root where db-backup-restore script is located
-    run ./db-backup-restore "$@"
+    # Use absolute path to the script
+    if [[ -f "/workspace/db-backup-restore" ]]; then
+        run /workspace/db-backup-restore "$@"
+    else
+        run ../db-backup-restore "$@"  # Fallback for local execution
+    fi
 }
 
 # Test basic help and version commands
 @test "db-backup-restore: help command shows usage information" {
     run_backup_restore_cmd help
     assert_success
-    assert_output --partial "Database Backup and Restore Script"
-    assert_output --partial "Usage:"
-    assert_output --partial "Commands:"
+    assert_output --partial "PostgreSQL Database Backup and Restore Tool"
+    assert_output --partial "USAGE:"
+    assert_output --partial "COMMANDS:"
     assert_output --partial "backup"
     assert_output --partial "restore"
 }

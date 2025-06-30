@@ -19,7 +19,40 @@ All scripts include comprehensive error handling, logging, security validation, 
 - **System Tools**: `gzip`, `bzip2`, or `lz4` (for compression)
 - **Permissions**: Appropriate database user privileges
 
+### Platform Compatibility
+
+These scripts are designed to work seamlessly on both **macOS** and **Linux**:
+
+- **macOS**: Uses BSD variants of system utilities by default, with automatic fallback to GNU versions if installed via Homebrew (e.g., `gstat`, `gtimeout`)
+- **Linux**: Uses GNU variants of system utilities natively
+- **Cross-platform features**: Automatic detection and handling of platform differences for commands like `stat`, `timeout`, `date`, and `sed`
+
+For optimal compatibility on macOS, consider installing GNU utilities:
+```bash
+# macOS: Install GNU utilities for enhanced compatibility
+brew install coreutils findutils gnu-sed
+```
+
+The scripts will automatically detect and use the appropriate command variants for your platform.
+
 ## Installation
+
+### Quick Installation (Recommended)
+
+Each script includes built-in installation commands for easy setup:
+
+```bash
+# Install to ~/.local/bin (user-specific, no sudo required)
+./db-backup-restore install
+./db-copy install
+./db-user-manager install
+
+# Make sure ~/.local/bin is in your PATH
+echo 'export PATH="$PATH:$HOME/.local/bin"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Manual Installation
 
 1. Clone the repository:
    ```bash
@@ -38,6 +71,26 @@ All scripts include comprehensive error handling, logging, security validation, 
    sudo ln -s $PWD/db-user-manager /usr/local/bin/
    sudo ln -s $PWD/db-copy /usr/local/bin/
    ```
+
+### Using Task (Taskfile.yml)
+
+If you have [Task](https://taskfile.dev/) installed, you can use our Taskfile for common operations:
+
+```bash
+# Install Task first
+brew install go-task/tap/go-task  # macOS
+# or
+sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d  # Linux
+
+# Common tasks
+task install           # Install all scripts to ~/.local/bin
+task uninstall         # Remove scripts from ~/.local/bin
+task update            # Update scripts to latest GitHub release
+task dev:test          # Run all tests
+task dev:test:fast     # Run fast tests only
+task dev:clean         # Clean up test artifacts
+task check:deps        # Check system dependencies
+```
 
 ## Development Setup
 
@@ -58,6 +111,24 @@ pre-commit install
 The hooks will automatically check shell script quality, fix formatting, and validate permissions before each commit.
 
 ## Quick Start
+
+### Script Management
+
+Each script includes built-in management commands:
+
+```bash
+# Install script globally
+./db-backup-restore install
+
+# Update to latest version
+./db-backup-restore update
+
+# Remove from system
+./db-backup-restore uninstall
+
+# Check version
+./db-backup-restore version
+```
 
 ### Backup & Restore
 
@@ -198,8 +269,9 @@ This repository includes a comprehensive test suite using Docker and bats (Bash 
 
 ### Running Tests
 
+#### Option 1: Local Testing (Install Dependencies)
 ```bash
-# Setup test environment
+# Setup test environment (installs bats and dependencies)
 cd tests && ./setup-tests.sh
 
 # Run all tests
@@ -207,10 +279,87 @@ cd tests && ./setup-tests.sh
 
 # Run with options
 ./run-tests --parallel 4 --verbose
-./run-tests --test tests/scripts/test_db_copy.bats
+./run-tests --test cross_platform
 ```
 
+#### Option 2: Docker Testing (No Local Dependencies)
+```bash
+# Run tests in Docker container (no setup required)
+./run-tests --docker
+
+# Run specific tests in Docker
+./run-tests --docker --test backup --verbose
+
+# Or use docker-compose for full control
+docker-compose -f docker-compose.test-runner.yml run test-runner ./run-tests
+```
+
+#### Platform-Specific Setup
+- **macOS**: Uses Homebrew for dependencies (brew install bats-core coreutils)
+- **Linux**: Uses package managers (apt, yum, dnf) for dependencies
+- **Both**: Automatic detection of GNU vs BSD utilities for compatibility
+
+#### Test Database Ports
+Tests use non-standard ports to avoid conflicts with existing PostgreSQL instances:
+- **Primary test database**: port 15432
+- **Secondary test database**: port 15433
+
 For detailed testing documentation, see [tests/README.md](tests/README.md).
+
+## Updating and Maintenance
+
+### Automatic Updates
+
+Each script can update itself to the latest GitHub release:
+
+```bash
+# Check for and install updates
+db-backup-restore update
+db-copy update
+db-user-manager update
+
+# Or use Task to update all scripts
+task update
+```
+
+### Version Management
+
+```bash
+# Check current versions
+task release:version
+
+# Check if scripts are up to date
+db-backup-restore version
+db-copy version
+db-user-manager version
+```
+
+### Maintenance Tasks
+
+Using the included Taskfile.yml:
+
+```bash
+# Development setup
+task dev:setup
+
+# Run linting on all scripts
+task dev:lint
+
+# Run comprehensive tests
+task dev:test
+
+# Clean up artifacts
+task dev:clean
+
+# Check system dependencies
+task check:deps
+
+# Check platform compatibility
+task check:platform
+
+# Run performance benchmarks
+task benchmark
+```
 
 ## Error Handling
 

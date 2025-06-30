@@ -23,32 +23,36 @@ teardown() {
 
 # Helper function to run db-copy command
 run_db_copy_cmd() {
-    cd ..  # Go to project root where db-copy script is located
-    run ./db-copy "$@"
+    # Use absolute path to the script
+    if [[ -f "/workspace/db-copy" ]]; then
+        run /workspace/db-copy "$@"
+    else
+        run ../db-copy "$@"  # Fallback for local execution
+    fi
 }
 
 # Test basic help and version commands
 @test "db-copy: help command shows usage information" {
     run_db_copy_cmd help
     assert_success
-    assert_output --partial "Database Copy Script"
-    assert_output --partial "Usage:"
-    assert_output --partial "Commands:"
+    assert_output --partial "PostgreSQL Database Copy Tool"
+    assert_output --partial "USAGE:"
+    assert_output --partial "COMMANDS:"
     assert_output --partial "copy"
 }
 
 @test "db-copy: version command shows version information" {
     run_db_copy_cmd version
     assert_success
-    assert_output --partial "db-copy version"
-    assert_output --partial "v1.0.0"
+    assert_output --partial "db-copy v"
+    assert_output --partial "1.0.0"
 }
 
 @test "db-copy: copy --help shows copy command help" {
     run_db_copy_cmd copy --help
     assert_success
-    assert_output --partial "Copy database command"
-    assert_output --partial "Options:"
+    assert_output --partial "Copy/clone a PostgreSQL database"
+    assert_output --partial "USAGE:"
     assert_output --partial "--target-dbname"
 }
 

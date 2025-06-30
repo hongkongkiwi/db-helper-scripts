@@ -1,0 +1,51 @@
+# Docker image for running database helper script tests
+# This allows running tests without installing dependencies locally
+
+FROM ubuntu:22.04
+
+# Avoid interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    bash \
+    git \
+    curl \
+    postgresql-client \
+    docker.io \
+    docker-compose \
+    python3 \
+    python3-pip \
+    bats \
+    coreutils \
+    findutils \
+    sed \
+    gawk \
+    grep \
+    gzip \
+    bzip2 \
+    lz4 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install bats helper libraries
+RUN mkdir -p /opt/bats-helpers && \
+    cd /opt/bats-helpers && \
+    git clone https://github.com/bats-core/bats-support.git && \
+    git clone https://github.com/bats-core/bats-assert.git && \
+    git clone https://github.com/bats-core/bats-file.git
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy scripts and tests
+COPY . .
+
+# Make scripts executable
+RUN chmod +x db-backup-restore db-user-manager db-copy run-tests && \
+    find tests/scripts -name "*.bats" -exec chmod +x {} \;
+
+# Set environment variables for bats helpers
+ENV BATS_HELPERS_DIR=/opt/bats-helpers
+
+# Default command
+CMD ["./run-tests", "--help"]

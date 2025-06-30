@@ -1,0 +1,46 @@
+# Git files
+.git
+.gitignore
+
+# Documentation (except README)
+*.md
+!README.md
+
+# Logs and temporary files
+*.log
+tmp/
+logs/
+reports/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Test artifacts
+tests/tmp/
+tests/logs/
+tests/reports/
+tests/bats-helpers/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+
+# Backup files
+*.bak
+*.backup
+
+# Cache directories
+.cache/
+node_modules/

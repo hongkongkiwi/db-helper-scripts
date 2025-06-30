@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # Test runner container with all dependencies
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: db-helper-test-runner
+    volumes:
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
+    network_mode: host
+    environment:
+      - BATS_HELPERS_DIR=/opt/bats-helpers
+      - PGPASSWORD=${PGPASSWORD:-}
+    command: ["./run-tests", "--help"]
+
+  # PostgreSQL test databases (same as in docker-compose.test.yml)
+  db-primary:
+    image: postgres:15
+    container_name: db-helper-test-primary
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+    ports:
+      - "15432:5432"
+    volumes:
+      - ./tests/fixtures:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db-secondary:
+    image: postgres:15
+    container_name: db-helper-test-secondary
+    environment:
+      POSTGRES_DB: testdb2
+      POSTGRES_USER: testuser2
+      POSTGRES_PASSWORD: testpass2
+    ports:
+      - "15433:5432"
+    volumes:
+      - ./tests/fixtures:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser2 -d testdb2"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

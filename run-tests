@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR="$SCRIPT_DIR/tests"
 
 # Default settings
-PARALLEL_JOBS=4
+PARALLEL_JOBS=1
 VERBOSE=false
 CLEANUP=true
 SPECIFIC_TEST=""
@@ -19,6 +19,7 @@ PERFORMANCE_REPORT=false
 OUTPUT_FORMAT="text"
 TIMEOUT=300
 RETRY_FAILED=false
+DOCKER_MODE=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -33,7 +34,64 @@ PASSED_TESTS=0
 FAILED_TESTS=0
 SKIPPED_TESTS=0
 TEST_START_TIME=""
+TEST_START_TIMESTAMP=""
 declare -a FAILED_TEST_NAMES=()
+
+# Cross-platform utility functions
+is_macos_with_gnu_tools() {
+    [[ "$OSTYPE" == "darwin"* ]]
+}
+
+get_preferred_command() {
+    local base_cmd="$1"
+    local gnu_prefix="${2:-g}"
+
+    if is_macos_with_gnu_tools && command -v "${gnu_prefix}${base_cmd}" &>/dev/null; then
+        echo "${gnu_prefix}${base_cmd}"
+    elif command -v "$base_cmd" &>/dev/null; then
+        echo "$base_cmd"
+    else
+        return 1
+    fi
+}
+
+# Execute a command with its preferred version (GNU on macOS if available)
+run_preferred_command() {
+    local base_cmd="$1"
+    shift
+    local cmd_args=("$@")
+
+    local preferred_cmd
+    if preferred_cmd=$(get_preferred_command "$base_cmd"); then
+        "$preferred_cmd" "${cmd_args[@]}"
+    else
+        log_error "$base_cmd command not available"
+        return 1
+    fi
+}
+
+# Cross-platform date calculation
+calculate_duration() {
+    local start_time="$1"
+    local end_time="$2"
+
+    echo $((end_time - start_time))
+}
+
+# Cross-platform timeout wrapper
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    local cmd=("$@")
+
+    if get_preferred_command "timeout" >/dev/null; then
+        run_preferred_command "timeout" "$timeout_seconds" "${cmd[@]}"
+    else
+        # Fallback for systems without timeout
+        log_warning "timeout command not available, running without timeout"
+        "${cmd[@]}"
+    fi
+}
 
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $*"
@@ -68,6 +126,8 @@ OPTIONS:
     --format <format>       Output format: text, json, junit (default: text)
     --timeout <seconds>     Test timeout in seconds (default: 300)
     --retry-failed         Retry failed tests once
+    --docker               Run tests in Docker container without local dependencies
+    --cleanup              Clean up test containers and exit
     -h, --help             Show this help message
 
 EXAMPLES:
@@ -82,6 +142,9 @@ EXAMPLES:
 
     # Generate comprehensive reports
     $0 --coverage --performance --format json
+
+    # Clean up test containers
+    $0 --cleanup
 
 EOF
 }
@@ -124,6 +187,15 @@ parse_arguments() {
             --retry-failed)
                 RETRY_FAILED=true
                 shift
+                ;;
+            --docker)
+                DOCKER_MODE=true
+                shift
+                ;;
+            --cleanup)
+                cleanup_test_environment
+                log_success "Test environment cleaned up"
+                exit 0
                 ;;
             -h|--help)
                 show_help
@@ -172,15 +244,37 @@ start_test_environment() {
 
     cd "$TEST_DIR"
 
-    # Stop any existing containers
-    if docker-compose -f ../docker-compose.test.yml ps -q | grep -q .; then
-        log_info "Stopping existing test containers..."
-        docker-compose -f ../docker-compose.test.yml down --volumes
-    fi
+    # Force cleanup any existing containers and resources first
+    log_info "Cleaning up any existing test containers..."
+    docker-compose -f ../docker-compose.test.yml down --volumes --remove-orphans >/dev/null 2>&1 || true
+
+    # Remove any orphaned containers with our naming pattern
+    docker rm -f db-test-primary db-test-secondary db-test-runner >/dev/null 2>&1 || true
+
+    # Remove any conflicting networks
+    docker network rm db-helper-scripts_db-test-network workspace_db-test-network >/dev/null 2>&1 || true
+
+    # Give Docker a moment to clean up
+    sleep 2
 
     # Start fresh containers
     log_info "Starting fresh test containers..."
-    timeout 120 docker-compose -f ../docker-compose.test.yml up -d --force-recreate
+    if ! run_with_timeout 120 docker-compose -f ../docker-compose.test.yml up -d --force-recreate; then
+        log_error "Failed to start Docker containers"
+        log_info "Attempting fallback cleanup and retry..."
+
+        # Fallback: more aggressive cleanup
+        docker system prune -f --filter "label=com.docker.compose.project=db-helper-scripts" >/dev/null 2>&1 || true
+        sleep 3
+
+        # Try one more time
+        if ! docker-compose -f ../docker-compose.test.yml up -d --force-recreate; then
+            log_error "Failed to start test environment after cleanup"
+            log_info "Container status:"
+            docker ps -a | grep -E "(db-test|db-helper)" || true
+            return 1
+        fi
+    fi
 
     # Wait for containers to be ready
     log_info "Waiting for containers to be ready..."
@@ -188,8 +282,8 @@ start_test_environment() {
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
-        if docker-compose -f ../docker-compose.test.yml exec -T db-primary pg_isready -U testuser >/dev/null 2>&1 && \
-           docker-compose -f ../docker-compose.test.yml exec -T db-secondary pg_isready -U testuser2 >/dev/null 2>&1; then
+        if docker-compose -f ../docker-compose.test.yml exec -T postgres-primary pg_isready -U testuser >/dev/null 2>&1 && \
+           docker-compose -f ../docker-compose.test.yml exec -T postgres-secondary pg_isready -U testuser2 >/dev/null 2>&1; then
             log_success "Test environment ready"
             return 0
         fi
@@ -200,6 +294,8 @@ start_test_environment() {
     done
 
     log_error "Test environment failed to start within timeout"
+    log_info "Container status:"
+    docker-compose -f ../docker-compose.test.yml ps || true
     return 1
 }
 
@@ -228,7 +324,7 @@ run_test_suite() {
 
     # Run tests with timeout
     local exit_code=0
-    if timeout "$TIMEOUT" $bats_cmd "$test_file" > "$test_results_file" 2> "$test_output_file"; then
+    if run_with_timeout "$TIMEOUT" $bats_cmd "$test_file" > "$test_results_file" 2> "$test_output_file"; then
         log_success "Test suite '$test_name' completed successfully"
     else
         exit_code=$?
@@ -340,6 +436,9 @@ EOF
 }
 
 generate_json_report() {
+    local current_time=$(date +%s)
+    local duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
+
     cat << EOF
 {
   "timestamp": "$(date -Iseconds)",
@@ -350,7 +449,7 @@ generate_json_report() {
     "skipped": $SKIPPED_TESTS,
     "success_rate": $(( PASSED_TESTS * 100 / (TOTAL_TESTS == 0 ? 1 : TOTAL_TESTS) ))
   },
-  "duration": $(($(date +%s) - $(date -d "$TEST_START_TIME" +%s))),
+  "duration": $duration,
   "failed_tests": [
 $(printf '    "%s"' "${FAILED_TEST_NAMES[@]}" | sed 's/$/,/' | sed '$s/,$//')
   ]
@@ -428,14 +527,112 @@ retry_failed_tests() {
     log_info "Retry completed: $((original_failed - FAILED_TESTS)) tests now passing"
 }
 
+# Function to run tests in Docker container
+run_tests_in_docker() {
+    log_info "Running tests in Docker container (no local dependencies required)"
+
+    # Check if Docker is available
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "Docker is required for --docker mode but not found"
+        log_error "Please install Docker: https://docs.docker.com/get-docker/"
+        exit 1
+    fi
+
+    # Check if Docker daemon is running
+    if ! docker info >/dev/null 2>&1; then
+        log_error "Docker daemon is not running"
+        log_error "Please start Docker daemon before running tests"
+        exit 1
+    fi
+
+    # Build test image if it doesn't exist or is outdated
+    local image_name="db-helper-scripts-test"
+    local dockerfile_path="Dockerfile.test"
+
+    if [[ ! -f "$dockerfile_path" ]]; then
+        log_error "Dockerfile.test not found. Cannot run tests in Docker mode."
+        exit 1
+    fi
+
+    log_info "Building test Docker image..."
+    if ! docker build -t "$image_name" -f "$dockerfile_path" .; then
+        log_error "Failed to build test Docker image"
+        exit 1
+    fi
+
+    # Prepare Docker run command
+    local docker_args=(
+        "run"
+        "--rm"
+        "--network=host"
+        "-v" "/var/run/docker.sock:/var/run/docker.sock"
+        "-v" "$(pwd):/workspace"
+        "-w" "/workspace"
+    )
+
+    # Add environment variables
+    if [[ -n "${PGPASSWORD:-}" ]]; then
+        docker_args+=("-e" "PGPASSWORD=$PGPASSWORD")
+    fi
+
+    # Add test runner arguments
+    local test_args=()
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        test_args+=("--verbose")
+    fi
+
+    if [[ "$PARALLEL_JOBS" -gt 1 ]]; then
+        test_args+=("--parallel" "$PARALLEL_JOBS")
+    fi
+
+    if [[ "$TIMEOUT" -ne 300 ]]; then
+        test_args+=("--timeout" "$TIMEOUT")
+    fi
+
+    if [[ -n "$SPECIFIC_TEST" ]]; then
+        test_args+=("--test" "$SPECIFIC_TEST")
+    fi
+
+    if [[ "$CLEANUP" != "true" ]]; then
+        test_args+=("--no-cleanup")
+    fi
+
+    if [[ "$RETRY_FAILED" == "true" ]]; then
+        test_args+=("--retry-failed")
+    fi
+
+    if [[ "$COVERAGE_REPORT" == "true" ]]; then
+        test_args+=("--coverage")
+    fi
+
+    if [[ "$PERFORMANCE_REPORT" == "true" ]]; then
+        test_args+=("--performance")
+    fi
+
+    if [[ "$OUTPUT_FORMAT" != "text" ]]; then
+        test_args+=("--output" "$OUTPUT_FORMAT")
+    fi
+
+    # Run tests in Docker container
+    log_info "Running tests in Docker container..."
+    docker "${docker_args[@]}" "$image_name" ./run-tests "${test_args[@]}"
+}
+
 main() {
     TEST_START_TIME=$(date)
+    TEST_START_TIMESTAMP=$(date +%s)
 
     log_info "Database Helper Scripts Test Runner"
     log_info "Starting comprehensive test execution..."
 
     parse_arguments "$@"
     check_dependencies
+
+    if [[ "$DOCKER_MODE" == "true" ]]; then
+        run_tests_in_docker
+        exit 0
+    fi
 
     if ! start_test_environment; then
         log_error "Failed to start test environment"
@@ -445,9 +642,13 @@ main() {
     # Find test files
     local test_files=()
     if [[ -n "$SPECIFIC_TEST" ]]; then
-        mapfile -t test_files < <(find "$TEST_DIR/scripts" -name "*${SPECIFIC_TEST}*.bats" -type f)
+        while IFS= read -r -d '' file; do
+            test_files+=("$file")
+        done < <(find "$TEST_DIR/scripts" -name "*${SPECIFIC_TEST}*.bats" -type f -print0)
     else
-        mapfile -t test_files < <(find "$TEST_DIR/scripts" -name "test_*.bats" -type f | sort)
+        while IFS= read -r file; do
+            test_files+=("$file")
+        done < <(find "$TEST_DIR/scripts" -name "test_*.bats" -type f | sort)
     fi
 
     if [[ ${#test_files[@]} -eq 0 ]]; then
@@ -474,7 +675,8 @@ main() {
     generate_performance_report
 
     # Final summary
-    local total_duration=$(($(date +%s) - $(date -d "$TEST_START_TIME" +%s)))
+    local current_time=$(date +%s)
+    local total_duration=$(calculate_duration "$TEST_START_TIMESTAMP" "$current_time")
 
     echo
     log_info "=== FINAL TEST SUMMARY ==="

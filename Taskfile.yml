@@ -1,0 +1,198 @@
+version: '3'
+
+vars:
+  LOCAL_BIN: "{{.HOME}}/.local/bin"
+  SCRIPTS:
+    - db-backup-restore
+    - db-copy
+    - db-user-manager
+  GITHUB_REPO: "patrol6/db-helper-scripts"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # Development tasks
+  dev:setup:
+    desc: Setup development environment
+    cmds:
+      - chmod +x db-backup-restore db-copy db-user-manager run-tests
+      - mkdir -p ~/.local/bin
+      - pre-commit install
+    status:
+      - test -f ~/.git/hooks/pre-commit
+
+  dev:lint:
+    desc: Run shellcheck on all scripts
+    cmds:
+      - shellcheck db-backup-restore db-copy db-user-manager run-tests tests/helpers/test_helpers.bash
+    silent: true
+
+  dev:test:
+    desc: Run all tests
+    cmds:
+      - ./run-tests
+
+  dev:test:fast:
+    desc: Run fast tests (cross-platform only)
+    cmds:
+      - ./run-tests --test cross_platform
+
+  dev:test:docker:
+    desc: Run tests in Docker
+    cmds:
+      - ./run-tests --docker
+
+  dev:clean:
+    desc: Clean up test artifacts and Docker containers
+    cmds:
+      - ./run-tests --cleanup
+      - docker system prune -f
+      - rm -rf tests/temp_*
+
+  # Installation tasks
+  install:
+    desc: Install scripts to ~/.local/bin
+    cmds:
+      - mkdir -p {{.LOCAL_BIN}}
+      - |
+        for script in {{.SCRIPTS | join " "}}; do
+          echo "Installing $script to {{.LOCAL_BIN}}/"
+          cp "$script" "{{.LOCAL_BIN}}/"
+          chmod +x "{{.LOCAL_BIN}}/$script"
+        done
+      - echo "Scripts installed to {{.LOCAL_BIN}}"
+      - echo "Make sure {{.LOCAL_BIN}} is in your PATH"
+
+  uninstall:
+    desc: Remove scripts from ~/.local/bin
+    cmds:
+      - |
+        for script in {{.SCRIPTS | join " "}}; do
+          if [ -f "{{.LOCAL_BIN}}/$script" ]; then
+            echo "Removing {{.LOCAL_BIN}}/$script"
+            rm "{{.LOCAL_BIN}}/$script"
+          fi
+        done
+      - echo "Scripts removed from {{.LOCAL_BIN}}"
+
+  update:
+    desc: Update scripts from latest GitHub release
+    cmds:
+      - task: update:check
+      - task: update:download
+      - task: update:install
+
+  update:check:
+    desc: Check for updates
+    cmds:
+      - |
+        echo "Checking for updates from {{.GITHUB_REPO}}..."
+        latest=$(curl -s "https://api.github.com/repos/{{.GITHUB_REPO}}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        echo "Latest release: $latest"
+        # Store in temp file for next task
+        echo "$latest" > /tmp/db-scripts-latest-version
+
+  update:download:
+    desc: Download latest release
+    cmds:
+      - |
+        latest=$(cat /tmp/db-scripts-latest-version 2>/dev/null || echo "latest")
+        echo "Downloading release $latest..."
+        curl -L "https://github.com/{{.GITHUB_REPO}}/archive/refs/tags/$latest.tar.gz" -o /tmp/db-scripts-update.tar.gz
+        mkdir -p /tmp/db-scripts-update
+        tar -xzf /tmp/db-scripts-update.tar.gz -C /tmp/db-scripts-update --strip-components=1
+
+  update:install:
+    desc: Install downloaded update
+    cmds:
+      - |
+        if [ -d "/tmp/db-scripts-update" ]; then
+          for script in {{.SCRIPTS | join " "}}; do
+            if [ -f "/tmp/db-scripts-update/$script" ]; then
+              echo "Updating $script..."
+              cp "/tmp/db-scripts-update/$script" .
+              chmod +x "$script"
+              # If installed in local bin, update there too
+              if [ -f "{{.LOCAL_BIN}}/$script" ]; then
+                cp "$script" "{{.LOCAL_BIN}}/"
+                chmod +x "{{.LOCAL_BIN}}/$script"
+              fi
+            fi
+          done
+          echo "Update complete!"
+          rm -rf /tmp/db-scripts-update /tmp/db-scripts-update.tar.gz /tmp/db-scripts-latest-version
+        else
+          echo "No update files found. Run 'task update:download' first."
+          exit 1
+        fi
+
+  # Release tasks
+  release:check:
+    desc: Check if ready for release
+    cmds:
+      - task: dev:lint
+      - task: dev:test
+      - git status --porcelain | grep -q . && echo "Working directory not clean" && exit 1 || echo "Working directory clean"
+
+  release:version:
+    desc: Show current versions in scripts
+    cmds:
+      - grep -n "version" db-backup-restore db-copy db-user-manager | grep -E "v[0-9]+\.[0-9]+\.[0-9]+"
+
+  # Documentation tasks
+  docs:readme:
+    desc: Validate README.md has current script versions
+    cmds:
+      - |
+        echo "Checking README.md for current versions..."
+        for script in {{.SCRIPTS | join " "}}; do
+          version=$(grep -E "v[0-9]+\.[0-9]+\.[0-9]+" "$script" | head -1 | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+")
+          if grep -q "$script.*$version" README.md; then
+            echo "✓ $script $version found in README.md"
+          else
+            echo "✗ $script $version NOT found in README.md"
+          fi
+        done
+
+  # Performance and benchmarking
+  benchmark:
+    desc: Run performance benchmarks
+    cmds:
+      - echo "Running basic performance tests..."
+      - time ./db-backup-restore help >/dev/null
+      - time ./db-copy help >/dev/null
+      - time ./db-user-manager help >/dev/null
+      - echo "Help command benchmarks complete"
+
+  # Utility tasks
+  check:deps:
+    desc: Check system dependencies
+    cmds:
+      - |
+        echo "Checking dependencies..."
+        deps="psql pg_dump pg_restore createdb dropdb gzip"
+        for dep in $deps; do
+          if command -v "$dep" >/dev/null 2>&1; then
+            echo "✓ $dep found"
+          else
+            echo "✗ $dep missing"
+          fi
+        done
+
+  check:platform:
+    desc: Check platform compatibility
+    cmds:
+      - |
+        echo "Platform: $(uname -s)"
+        echo "Shell: $SHELL"
+        echo "Bash version: $BASH_VERSION"
+        if command -v gstat >/dev/null 2>&1; then
+          echo "✓ GNU stat available (gstat)"
+        elif stat --version >/dev/null 2>&1; then
+          echo "✓ GNU stat available"
+        else
+          echo "✓ BSD stat available"
+        fi

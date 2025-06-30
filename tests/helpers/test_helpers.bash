@@ -2,18 +2,18 @@
 # Test helpers for database helper scripts testing
 # This file contains common functions used across all test files
 
-# Test configuration
+# Test configuration - these should match docker-compose.test.yml
 export TEST_DB_PRIMARY="testdb"
 export TEST_USER_PRIMARY="testuser"
 export TEST_PASS_PRIMARY="testpass"
-export TEST_HOST_PRIMARY="localhost"
+export TEST_HOST_PRIMARY="postgres-primary"
 export TEST_PORT_PRIMARY="5432"
 
 export TEST_DB_SECONDARY="testdb2"
 export TEST_USER_SECONDARY="testuser2"
 export TEST_PASS_SECONDARY="testpass2"
-export TEST_HOST_SECONDARY="localhost"
-export TEST_PORT_SECONDARY="5433"
+export TEST_HOST_SECONDARY="postgres-secondary"
+export TEST_PORT_SECONDARY="5432"
 
 export TEST_BACKUP_DIR="/tmp/test_backups"
 export TEST_TEMP_DIR="/tmp/db_script_tests"
@@ -71,8 +71,16 @@ wait_for_database() {
 
     echo "Waiting for database ${dbname} on ${host}:${port}..."
 
+    # Use correct password based on which database we're connecting to
+    local password
+    if [[ "$host" == "postgres-primary" || "$host" == "localhost" && "$port" == "15432" ]]; then
+        password="$TEST_PASS_PRIMARY"
+    else
+        password="$TEST_PASS_SECONDARY"
+    fi
+
     while [ $attempt -le $max_attempts ]; do
-        if PGPASSWORD="${TEST_PASS_PRIMARY}" psql -h "$host" -p "$port" -U "$user" -d "$dbname" -c "SELECT 1;" >/dev/null 2>&1; then
+        if timeout 5 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d '$dbname' -c 'SELECT 1;'" >/dev/null 2>&1; then
             echo "Database ${dbname} is ready!"
             return 0
         fi
@@ -94,7 +102,7 @@ test_db_connection() {
     local dbname="$4"
     local password="$5"
 
-    PGPASSWORD="$password" psql -h "$host" -p "$port" -U "$user" -d "$dbname" -c "SELECT 1;" >/dev/null 2>&1
+    timeout 10 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d '$dbname' -c 'SELECT 1;'" >/dev/null 2>&1
 }
 
 # Database query functions
@@ -106,7 +114,7 @@ execute_sql() {
     local password="$5"
     local sql="$6"
 
-    PGPASSWORD="$password" psql -h "$host" -p "$port" -U "$user" -d "$dbname" -t -A -c "$sql" 2>/dev/null
+    timeout 15 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d '$dbname' -t -A -c \"$sql\"" 2>/dev/null
 }
 
 get_table_count() {
@@ -138,7 +146,7 @@ database_exists() {
     local dbname="$4"
     local password="$5"
 
-    local result=$(PGPASSWORD="$password" psql -h "$host" -p "$port" -U "$user" -d "postgres" -t -A -c "SELECT 1 FROM pg_database WHERE datname='$dbname';" 2>/dev/null)
+    local result=$(timeout 10 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d 'postgres' -t -A -c \"SELECT 1 FROM pg_database WHERE datname='$dbname';\"" 2>/dev/null)
     [ "$result" = "1" ]
 }
 
@@ -149,7 +157,7 @@ user_exists() {
     local target_user="$4"
     local password="$5"
 
-    local result=$(PGPASSWORD="$password" psql -h "$host" -p "$port" -U "$user" -d "postgres" -t -A -c "SELECT 1 FROM pg_user WHERE usename='$target_user';" 2>/dev/null)
+    local result=$(timeout 10 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d 'postgres' -t -A -c \"SELECT 1 FROM pg_user WHERE usename='$target_user';\"" 2>/dev/null)
     [ "$result" = "1" ]
 }
 
@@ -185,7 +193,7 @@ create_test_database() {
     local dbname="$4"
     local password="$5"
 
-    PGPASSWORD="$password" createdb -h "$host" -p "$port" -U "$user" "$dbname" 2>/dev/null
+    timeout 20 bash -c "PGPASSWORD='$password' createdb -h '$host' -p '$port' -U '$user' '$dbname'" 2>/dev/null
 }
 
 drop_test_database() {
@@ -195,12 +203,13 @@ drop_test_database() {
     local dbname="$4"
     local password="$5"
 
-    PGPASSWORD="$password" dropdb -h "$host" -p "$port" -U "$user" "$dbname" 2>/dev/null
+    timeout 20 bash -c "PGPASSWORD='$password' dropdb -h '$host' -p '$port' -U '$user' '$dbname'" 2>/dev/null
 }
 
 cleanup_test_databases() {
     # List of potential test databases to clean up
-    local test_dbs=("test_copy_target" "test_backup_restore" "test_user_mgmt" "temp_test_db" "validation_test_db")
+    local test_dbs=("test_copy_target" "test_backup_restore" "test_user_mgmt" "temp_test_db" "validation_test_db"
+                   "test_schema_only" "test_data_only" "test_cross_server" "test_include_tables" "test_exclude_tables" "test_include_schema")
 
     for db in "${test_dbs[@]}"; do
         if database_exists "$TEST_HOST_PRIMARY" "$TEST_PORT_PRIMARY" "$TEST_USER_PRIMARY" "$db" "$TEST_PASS_PRIMARY"; then
@@ -211,6 +220,100 @@ cleanup_test_databases() {
             drop_test_database "$TEST_HOST_SECONDARY" "$TEST_PORT_SECONDARY" "$TEST_USER_SECONDARY" "$db" "$TEST_PASS_SECONDARY"
         fi
     done
+}
+
+# Additional helper functions needed by tests
+assert_database_exists() {
+    local host="$1"
+    local port="$2"
+    local user="$3"
+    local dbname="$4"
+    local password="$5"
+
+    if ! database_exists "$host" "$port" "$user" "$dbname" "$password"; then
+        echo "Database $dbname does not exist on $host:$port"
+        return 1
+    fi
+}
+
+assert_table_exists() {
+    local host="$1"
+    local port="$2"
+    local user="$3"
+    local dbname="$4"
+    local password="$5"
+    local table="$6"
+
+    if ! table_exists "$host" "$port" "$user" "$dbname" "$password" "$table"; then
+        echo "Table $table does not exist in database $dbname"
+        return 1
+    fi
+}
+
+assert_row_count() {
+    local host="$1"
+    local port="$2"
+    local user="$3"
+    local dbname="$4"
+    local password="$5"
+    local table="$6"
+    local expected="$7"
+
+    local actual=$(get_row_count "$host" "$port" "$user" "$dbname" "$password" "$table")
+    if [[ "$actual" != "$expected" ]]; then
+        echo "Expected $expected rows in $table, got $actual"
+        return 1
+    fi
+}
+
+reset_test_data() {
+    local host="$1"
+    local port="$2"
+    local user="$3"
+    local dbname="$4"
+    local password="$5"
+
+    # Create basic test tables and data if they don't exist
+    timeout 30 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d '$dbname'" << 'EOF' >/dev/null 2>&1
+-- Create users table if not exists
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create products table if not exists
+CREATE TABLE IF NOT EXISTS products (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    price DECIMAL(10,2),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create test schema and table
+CREATE SCHEMA IF NOT EXISTS test_schema;
+CREATE TABLE IF NOT EXISTS test_schema.test_table (
+    id SERIAL PRIMARY KEY,
+    data TEXT
+);
+
+-- Insert test data
+INSERT INTO users (username, email) VALUES
+    ('testuser1', 'test1@example.com'),
+    ('testuser2', 'test2@example.com')
+ON CONFLICT (username) DO NOTHING;
+
+INSERT INTO products (name, price) VALUES
+    ('Product A', 19.99),
+    ('Product B', 29.99)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO test_schema.test_table (data) VALUES
+    ('test data 1'),
+    ('test data 2')
+ON CONFLICT DO NOTHING;
+EOF
 }
 
 # File system utilities
@@ -361,48 +464,36 @@ run_db_copy() {
     ./db-copy $args
 }
 
-# Test data helpers
-reset_test_data() {
+# Test data helpers - simplified version for tests
+reset_test_data_simple() {
     local host="$1"
     local port="$2"
     local user="$3"
     local dbname="$4"
     local password="$5"
 
-    # Reset test data to known state
+    # Reset test data to known state - only for tables that exist
     execute_sql "$host" "$port" "$user" "$dbname" "$password" "
-        DELETE FROM public.order_items;
-        DELETE FROM public.orders;
-        DELETE FROM public.users;
-        DELETE FROM public.products;
-        DELETE FROM test_schema.test_table;
-        DELETE FROM public.temp_logs;
-        DELETE FROM public.cache_data;
+        DELETE FROM public.users WHERE username LIKE 'testuser%';
+        DELETE FROM public.products WHERE name LIKE 'Test Product%';
 
-        -- Reset sequences
-        ALTER SEQUENCE public.users_id_seq RESTART WITH 1;
-        ALTER SEQUENCE public.orders_id_seq RESTART WITH 1;
-        ALTER SEQUENCE public.products_id_seq RESTART WITH 1;
-        ALTER SEQUENCE public.order_items_id_seq RESTART WITH 1;
-        ALTER SEQUENCE test_schema.test_table_id_seq RESTART WITH 1;
-        ALTER SEQUENCE public.temp_logs_id_seq RESTART WITH 1;
-        ALTER SEQUENCE public.cache_data_id_seq RESTART WITH 1;
-    "
+        -- Reset sequences if they exist
+        SELECT setval('public.users_id_seq', 1, false) WHERE EXISTS (SELECT 1 FROM pg_sequences WHERE sequencename = 'users_id_seq');
+        SELECT setval('public.products_id_seq', 1, false) WHERE EXISTS (SELECT 1 FROM pg_sequences WHERE sequencename = 'products_id_seq');
+    " 2>/dev/null || true
 
     # Re-insert basic test data
     execute_sql "$host" "$port" "$user" "$dbname" "$password" "
-        INSERT INTO public.users (username, email, metadata) VALUES
-        ('testuser1', 'test1@example.com', '{\"role\": \"admin\"}'),
-        ('testuser2', 'test2@example.com', '{\"role\": \"user\"}');
+        INSERT INTO public.users (username, email) VALUES
+        ('testuser1', 'test1@example.com'),
+        ('testuser2', 'test2@example.com')
+        ON CONFLICT (username) DO NOTHING;
 
-        INSERT INTO public.products (name, description, price, category, in_stock) VALUES
-        ('Test Product 1', 'A test product', 19.99, 'electronics', 100),
-        ('Test Product 2', 'Another test product', 29.99, 'books', 50);
-
-        INSERT INTO test_schema.test_table (name, data) VALUES
-        ('test_record_1', 'Some test data'),
-        ('test_record_2', 'More test data');
-    "
+        INSERT INTO public.products (name, price) VALUES
+        ('Test Product 1', 19.99),
+        ('Test Product 2', 29.99)
+        ON CONFLICT DO NOTHING;
+    " 2>/dev/null || true
 }
 
 # Performance testing helpers

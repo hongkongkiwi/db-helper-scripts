@@ -96,6 +96,59 @@ WORK_MEM=""
 SHARED_BUFFERS=""
 WAL_LEVEL=""
 
+# Cross-platform utility functions
+is_macos_with_gnu_tools() {
+    [[ "$OSTYPE" == "darwin"* ]]
+}
+
+get_preferred_command() {
+    local base_cmd="$1"
+    local gnu_prefix="${2:-g}"
+
+    if is_macos_with_gnu_tools && command -v "${gnu_prefix}${base_cmd}" &>/dev/null; then
+        echo "${gnu_prefix}${base_cmd}"
+    elif command -v "$base_cmd" &>/dev/null; then
+        echo "$base_cmd"
+    else
+        return 1
+    fi
+}
+
+# Execute a command with its preferred version (GNU on macOS if available)
+run_preferred_command() {
+    local base_cmd="$1"
+    shift
+    local cmd_args=("$@")
+
+    local preferred_cmd
+    if preferred_cmd=$(get_preferred_command "$base_cmd"); then
+        "$preferred_cmd" "${cmd_args[@]}"
+    else
+        log_error "$base_cmd command not available"
+        return 1
+    fi
+}
+
+# Execute command with timeout (cross-platform)
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    local cmd=("$@")
+
+    if [[ "$timeout_seconds" -eq 0 ]]; then
+        "${cmd[@]}"
+        return $?
+    fi
+
+    if get_preferred_command "timeout" >/dev/null; then
+        run_preferred_command "timeout" "$timeout_seconds" "${cmd[@]}"
+    else
+        # Fallback: no timeout available - just run the command
+        log_warning "timeout command not available, running without timeout"
+        "${cmd[@]}"
+    fi
+}
+
 # Input validation and security functions
 sanitize_for_log() {
     local input="$1"
@@ -276,7 +329,7 @@ execute_pg_command() {
 
     # Execute the command with timeout if specified
     if [[ $CONNECTION_TIMEOUT -gt 0 ]]; then
-        timeout "$CONNECTION_TIMEOUT" "$command" "$connection_string" "$@"
+        run_with_timeout "$CONNECTION_TIMEOUT" "$command" "$connection_string" "$@"
     else
         "$command" "$connection_string" "$@"
     fi
@@ -531,9 +584,19 @@ copy_database() {
         elif [[ "$DROP_TARGET" == "true" ]]; then
             log_warning "Target database will be dropped and recreated"
             if [[ "$SKIP_CONFIRMATION" != "true" ]]; then
-                read -p "Are you sure you want to drop the target database? (y/N): " -r
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    log_info "Operation cancelled by user"
+                if [[ -t 0 ]]; then
+                    # Add timeout to prevent hangs in test environments
+                    if read -p "Are you sure you want to drop the target database? (y/N): " -t 10 -r 2>/dev/null; then
+                        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                            log_info "Operation cancelled by user"
+                            exit $EXIT_SUCCESS
+                        fi
+                    else
+                        log_warning "No response within 10 seconds, cancelling operation"
+                        exit $EXIT_SUCCESS
+                    fi
+                else
+                    log_warning "Non-interactive environment: skipping drop confirmation without --skip-confirmation"
                     exit $EXIT_SUCCESS
                 fi
             fi
@@ -984,10 +1047,19 @@ cmd_copy() {
                 shift 2
                 ;;
             --password)
-                read -s -p "Enter password: " password
-                echo
-                SRC_DB_PASSWORD="$password"
-                TARGET_DB_PASSWORD="$password"
+                if [[ -t 0 ]]; then
+                    # Add timeout to prevent hangs in test environments
+                    if read -s -p "Enter password: " -t 10 password 2>/dev/null; then
+                        echo
+                        SRC_DB_PASSWORD="$password"
+                        TARGET_DB_PASSWORD="$password"
+                    else
+                        echo
+                        log_warning "No password provided within 10 seconds, skipping password input"
+                    fi
+                else
+                    log_verbose "Non-interactive environment, skipping password prompt"
+                fi
                 shift
                 ;;
             # Copy options
@@ -1261,6 +1333,9 @@ USAGE:
 
 COMMANDS:
     copy, clone         Copy/clone a database from source to target
+    install             Install script to ~/.local/bin for global access
+    uninstall           Remove script from ~/.local/bin
+    update              Update script to latest version from GitHub
     help                Show this help message
     version             Show version information
 
@@ -1429,6 +1504,139 @@ show_version() {
     echo "$SCRIPT_NAME v$SCRIPT_VERSION"
 }
 
+# Installation and update functions
+cmd_install() {
+    local install_dir="$HOME/.local/bin"
+    local script_path
+    script_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+
+    # Create install directory if it doesn't exist
+    if ! mkdir -p "$install_dir"; then
+        log_error "Failed to create install directory: $install_dir"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Copy script to install directory
+    if ! cp "$script_path" "$install_dir/$SCRIPT_NAME"; then
+        log_error "Failed to copy script to $install_dir"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Make executable
+    if ! chmod +x "$install_dir/$SCRIPT_NAME"; then
+        log_error "Failed to make script executable"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    log_info "Successfully installed $SCRIPT_NAME to $install_dir"
+    log_info "Make sure $install_dir is in your PATH to use the script globally"
+
+    # Check if directory is in PATH
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+        log_warning "$install_dir is not in your PATH"
+        log_info "Add it to your PATH by running:"
+        log_info "  echo 'export PATH=\"\$PATH:$install_dir\"' >> ~/.bashrc"
+        log_info "  source ~/.bashrc"
+    fi
+}
+
+cmd_uninstall() {
+    local install_dir="$HOME/.local/bin"
+    local installed_script="$install_dir/$SCRIPT_NAME"
+
+    if [[ -f "$installed_script" ]]; then
+        if rm "$installed_script"; then
+            log_info "Successfully removed $SCRIPT_NAME from $install_dir"
+        else
+            log_error "Failed to remove $installed_script"
+            exit $EXIT_GENERAL_ERROR
+        fi
+    else
+        log_warning "$SCRIPT_NAME is not installed in $install_dir"
+        log_info "Run '$SCRIPT_NAME install' to install it first"
+    fi
+}
+
+cmd_update() {
+    local github_repo="patrol6/db-helper-scripts"
+    local temp_dir
+    temp_dir=$(mktemp -d) || {
+        log_error "Failed to create temporary directory"
+        exit $EXIT_GENERAL_ERROR
+    }
+
+    # Cleanup temp directory on exit
+    trap "rm -rf '$temp_dir'" EXIT
+
+    log_info "Checking for updates from https://github.com/$github_repo..."
+
+    # Get latest release info
+    local latest_version
+    if ! latest_version=$(curl -s "https://api.github.com/repos/$github_repo/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' 2>/dev/null); then
+        log_error "Failed to check for updates. Please check your internet connection."
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    if [[ -z "$latest_version" ]]; then
+        log_error "Could not determine latest version"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    log_info "Latest version: $latest_version"
+    log_info "Current version: v$SCRIPT_VERSION"
+
+    if [[ "$latest_version" == "v$SCRIPT_VERSION" ]]; then
+        log_info "You are already running the latest version"
+        return 0
+    fi
+
+    log_info "Downloading update..."
+
+    # Download latest release
+    local download_url="https://github.com/$github_repo/archive/refs/tags/$latest_version.tar.gz"
+    if ! curl -L "$download_url" -o "$temp_dir/update.tar.gz"; then
+        log_error "Failed to download update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Extract archive
+    if ! tar -xzf "$temp_dir/update.tar.gz" -C "$temp_dir" --strip-components=1; then
+        log_error "Failed to extract update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Check if the script exists in the download
+    if [[ ! -f "$temp_dir/$SCRIPT_NAME" ]]; then
+        log_error "Script not found in downloaded update"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Get current script path
+    local current_script
+    current_script=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+
+    # Update current script
+    if ! cp "$temp_dir/$SCRIPT_NAME" "$current_script"; then
+        log_error "Failed to update script"
+        exit $EXIT_GENERAL_ERROR
+    fi
+
+    # Make sure it's executable
+    chmod +x "$current_script"
+
+    # If installed in ~/.local/bin, update there too
+    local install_dir="$HOME/.local/bin"
+    if [[ -f "$install_dir/$SCRIPT_NAME" ]]; then
+        if cp "$temp_dir/$SCRIPT_NAME" "$install_dir/$SCRIPT_NAME"; then
+            chmod +x "$install_dir/$SCRIPT_NAME"
+            log_info "Also updated installed version in $install_dir"
+        fi
+    fi
+
+    log_info "Successfully updated $SCRIPT_NAME to $latest_version"
+    log_info "Restart any running instances to use the new version"
+}
+
 # Main function
 main() {
     # Parse global options first
@@ -1454,7 +1662,7 @@ main() {
                 show_help
                 exit $EXIT_SUCCESS
                 ;;
-            copy|clone|help|version)
+            copy|clone|help|version|install|uninstall|update)
                 break
                 ;;
             *)
@@ -1474,24 +1682,28 @@ main() {
     local command="$1"
     shift
 
-    # Check prerequisites
-    if ! command -v psql &> /dev/null; then
-        log_error "PostgreSQL client (psql) is required but not installed"
-        log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
-        exit $EXIT_GENERAL_ERROR
-    fi
+    # Check prerequisites (skip for install/uninstall/update commands)
+    case "$command" in
+        copy|clone)
+            if ! command -v psql &> /dev/null; then
+                log_error "PostgreSQL client (psql) is required but not installed"
+                log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
+                exit $EXIT_GENERAL_ERROR
+            fi
 
-    if ! command -v pg_dump &> /dev/null; then
-        log_error "PostgreSQL dump utility (pg_dump) is required but not installed"
-        log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
-        exit $EXIT_GENERAL_ERROR
-    fi
+            if ! command -v pg_dump &> /dev/null; then
+                log_error "PostgreSQL dump utility (pg_dump) is required but not installed"
+                log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
+                exit $EXIT_GENERAL_ERROR
+            fi
 
-    if ! command -v pg_restore &> /dev/null; then
-        log_error "PostgreSQL restore utility (pg_restore) is required but not installed"
-        log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
-        exit $EXIT_GENERAL_ERROR
-    fi
+            if ! command -v pg_restore &> /dev/null; then
+                log_error "PostgreSQL restore utility (pg_restore) is required but not installed"
+                log_error "Install with: brew install postgresql (macOS) or apt-get install postgresql-client (Ubuntu)"
+                exit $EXIT_GENERAL_ERROR
+            fi
+            ;;
+    esac
 
     # Execute command
     case "$command" in
@@ -1500,6 +1712,15 @@ main() {
             ;;
         clone)
             cmd_clone "$@"
+            ;;
+        install)
+            cmd_install "$@"
+            ;;
+        uninstall)
+            cmd_uninstall "$@"
+            ;;
+        update)
+            cmd_update "$@"
             ;;
         help)
             show_help

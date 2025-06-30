@@ -26,8 +26,12 @@ teardown() {
 
 # Helper function to run db-user-manager command
 run_user_manager_cmd() {
-    cd ..  # Go to project root where db-user-manager script is located
-    run ./db-user-manager "$@"
+    # Use absolute path to the script
+    if [[ -f "/workspace/db-user-manager" ]]; then
+        run /workspace/db-user-manager "$@"
+    else
+        run ../db-user-manager "$@"  # Fallback for local execution
+    fi
 }
 
 # Helper function to clean up test users

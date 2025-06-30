@@ -1,4 +1,4 @@
-version: '3.8'
+# Docker Compose test environment for database helper scripts
 
 services:
   # Primary PostgreSQL instance for main testing
@@ -11,7 +11,7 @@ services:
       POSTGRES_PASSWORD: testpass
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres_primary_data:/var/lib/postgresql/data
       - ./tests/fixtures:/docker-entrypoint-initdb.d
@@ -33,7 +33,7 @@ services:
       POSTGRES_PASSWORD: testpass2
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
-      - "5433:5432"
+      - "15433:5432"
     volumes:
       - postgres_secondary_data:/var/lib/postgresql/data
     healthcheck:
