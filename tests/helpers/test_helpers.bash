@@ -147,7 +147,7 @@ database_exists() {
     local password="$5"
 
     local result
-    local result=$(timeout 10 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d 'postgres' -t -A -c \"SELECT 1 FROM pg_database WHERE datname='$dbname';\"" 2>/dev/null)
+    result=$(timeout 10 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d 'postgres' -t -A -c \"SELECT 1 FROM pg_database WHERE datname='$dbname';\"" 2>/dev/null)
     [ "$result" = "1" ]
 }
 
@@ -159,7 +159,7 @@ user_exists() {
     local password="$5"
 
     local result
-    local result=$(timeout 10 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d 'postgres' -t -A -c \"SELECT 1 FROM pg_user WHERE usename='$target_user';\"" 2>/dev/null)
+    result=$(timeout 10 bash -c "PGPASSWORD='$password' psql -h '$host' -p '$port' -U '$user' -d 'postgres' -t -A -c \"SELECT 1 FROM pg_user WHERE usename='$target_user';\"" 2>/dev/null)
     [ "$result" = "1" ]
 }
 
@@ -172,7 +172,7 @@ table_exists() {
     local table="$6"
 
     local result
-    local result=$(execute_sql "$host" "$port" "$user" "$dbname" "$password" "SELECT 1 FROM information_schema.tables WHERE table_name='$table' AND table_schema='public';")
+    result=$(execute_sql "$host" "$port" "$user" "$dbname" "$password" "SELECT 1 FROM information_schema.tables WHERE table_name='$table' AND table_schema='public';")
     [ "$result" = "1" ]
 }
 
@@ -185,7 +185,7 @@ schema_exists() {
     local schema="$6"
 
     local result
-    local result=$(execute_sql "$host" "$port" "$user" "$dbname" "$password" "SELECT 1 FROM information_schema.schemata WHERE schema_name='$schema';")
+    result=$(execute_sql "$host" "$port" "$user" "$dbname" "$password" "SELECT 1 FROM information_schema.schemata WHERE schema_name='$schema';")
     [ "$result" = "1" ]
 }
 
@@ -226,50 +226,7 @@ cleanup_test_databases() {
     done
 }
 
-# Additional helper functions needed by tests
-assert_database_exists() {
-    local host="$1"
-    local port="$2"
-    local user="$3"
-    local dbname="$4"
-    local password="$5"
-
-    if ! database_exists "$host" "$port" "$user" "$dbname" "$password"; then
-        echo "Database $dbname does not exist on $host:$port"
-        return 1
-    fi
-}
-
-assert_table_exists() {
-    local host="$1"
-    local port="$2"
-    local user="$3"
-    local dbname="$4"
-    local password="$5"
-    local table="$6"
-
-    if ! table_exists "$host" "$port" "$user" "$dbname" "$password" "$table"; then
-        echo "Table $table does not exist in database $dbname"
-        return 1
-    fi
-}
-
-assert_row_count() {
-    local host="$1"
-    local port="$2"
-    local user="$3"
-    local dbname="$4"
-    local password="$5"
-    local table="$6"
-    local expected="$7"
-
-    local actual
-    local actual=$(get_row_count "$host" "$port" "$user" "$dbname" "$password" "$table")
-    if [[ "$actual" != "$expected" ]]; then
-        echo "Expected $expected rows in $table, got $actual"
-        return 1
-    fi
-}
+# Additional helper functions needed by tests - REMOVED DUPLICATES
 
 reset_test_data() {
     local host="$1"
@@ -443,7 +400,8 @@ assert_row_count() {
     local description="${8:-Table $table row count}"
 
     local actual_count
-    local actual_count=$(get_row_count "$host" "$port" "$user" "$dbname" "$password" "$table")
+    local actual_count
+    actual_count=$(get_row_count "$host" "$port" "$user" "$dbname" "$password" "$table")
 
     if [ "$actual_count" = "$expected_count" ]; then
         echo -e "${GREEN}✓ ${description}: $actual_count = $expected_count${NC}"
@@ -506,13 +464,14 @@ reset_test_data_simple() {
 measure_execution_time() {
     local command="$1"
     local start_time
-    local start_time=$(date +%s%3N)
+    local start_time
+    start_time=$(date +%s%3N)
 
     eval "$command"
     local exit_code=$?
 
     local end_time
-    local end_time=$(date +%s%3N)
+    end_time=$(date +%s%3N)
     local duration=$((end_time - start_time))
 
     echo "Execution time: ${duration}ms"
