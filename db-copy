@@ -6,7 +6,9 @@
 set -euo pipefail
 
 # Script configuration
-SCRIPT_NAME=$(basename "$0")
+if [[ -z "${SCRIPT_NAME:-}" ]]; then
+    SCRIPT_NAME=$(basename "$0")
+fi
 SCRIPT_VERSION="2.0.2"
 
 # Colors for output
@@ -91,8 +93,8 @@ EXIT_VALIDATION_ERROR=5
 # Advanced performance options (future features)
 OPTIMIZE_PERFORMANCE=false
 # CHECKPOINT_FREQUENCY=""  # Future feature
-# MAINTENANCE_WORK_MEM=""  # Future feature
-# WORK_MEM=""              # Future feature
+MAINTENANCE_WORK_MEM=""
+WORK_MEM=""
 # SHARED_BUFFERS=""        # Future feature
 # WAL_LEVEL=""             # Future feature
 

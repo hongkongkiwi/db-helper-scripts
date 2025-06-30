@@ -40,6 +40,9 @@ setup_test_environment() {
     chmod 700 "${TEST_BACKUP_DIR}"
     chmod 700 "${TEST_TEMP_DIR}"
 
+    # Set database password for scripts to use
+    export PGPASSWORD="${TEST_PASS_PRIMARY}"
+
     # Wait for databases to be ready
     wait_for_database "${TEST_HOST_PRIMARY}" "${TEST_PORT_PRIMARY}" "${TEST_USER_PRIMARY}" "${TEST_DB_PRIMARY}"
     wait_for_database "${TEST_HOST_SECONDARY}" "${TEST_PORT_SECONDARY}" "${TEST_USER_SECONDARY}" "${TEST_DB_SECONDARY}"
@@ -58,6 +61,14 @@ teardown_test_environment() {
     cleanup_test_databases
 
     echo "Test environment cleanup complete"
+}
+
+# Cleanup function
+cleanup_test_databases() {
+    # This function can be called to clean up test databases
+    # For now, it's a placeholder - we don't want to delete main test databases
+    # shellcheck disable=SC2317
+    return 0
 }
 
 # Database utility functions

@@ -6,7 +6,9 @@
 set -euo pipefail
 
 # Script configuration
-SCRIPT_NAME=$(basename "$0")
+if [[ -z "${SCRIPT_NAME:-}" ]]; then
+    SCRIPT_NAME=$(basename "$0")
+fi
 SCRIPT_VERSION="2.0.2"
 DEFAULT_BACKUP_DIR="./backups"
 DEFAULT_COMPRESSION="gzip"
@@ -2147,6 +2149,7 @@ cmd_backup() {
     local backup_dir="$DEFAULT_BACKUP_DIR"
     local compression="$DEFAULT_COMPRESSION"
     local format="custom"
+    local backup_file=""
     local pg_dump_args=()
 
     # Extract global options from arguments
@@ -2162,6 +2165,26 @@ cmd_backup() {
         case $1 in
             -D|--dir)
                 backup_dir=$(validate_file_path "$2" false)
+                shift 2
+                ;;
+            --file)
+                backup_file=$(validate_file_path "$2" false)
+                # Auto-detect format from file extension
+                case "$backup_file" in
+                    *.sql)
+                        format="plain"
+                        ;;
+                    *.tar)
+                        format="tar"
+                        ;;
+                    *.custom|*.dump)
+                        format="custom"
+                        ;;
+                    *)
+                        log_info "Unknown file extension, using custom format"
+                        format="custom"
+                        ;;
+                esac
                 shift 2
                 ;;
             -c|--compression)
@@ -2385,6 +2408,10 @@ cmd_backup() {
                 SAVE_CONFIG=$(validate_file_path "$2" false)
                 shift 2
                 ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
             --help)
                 show_backup_help
                 exit 0
@@ -2476,11 +2503,27 @@ cmd_backup() {
     log_verbose "Created backup directory: $backup_dir"
 
     # Generate backup filename
-    local backup_file
-    backup_file="$backup_dir/$(generate_backup_filename "$db_name" "$format" "$compression")"
+    if [[ -z "$backup_file" ]]; then
+        backup_file="$backup_dir/$(generate_backup_filename "$db_name" "$format" "$compression")"
+    fi
 
     log_info "Starting backup of database: $db_name"
     log_info "Backup file: $backup_file"
+
+    # Handle dry-run mode
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "DRY RUN MODE: Would execute backup with following parameters:"
+        log_info "  Database: $db_name"
+        log_info "  Format: $format"
+        log_info "  Compression: $compression"
+        log_info "  Output file: $backup_file"
+        if [[ ${#pg_dump_args[@]} -gt 0 ]]; then
+            log_info "  Additional arguments: ${pg_dump_args[*]}"
+        fi
+        log_success "Dry run completed successfully"
+        remove_lock_file
+        return 0
+    fi
 
     # Configure SSL environment variables
     if [[ -n "$SSL_MODE" || -n "$SSL_CERT" || -n "$SSL_KEY" || -n "$SSL_CA" ]]; then

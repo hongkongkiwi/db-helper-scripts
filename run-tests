@@ -701,7 +701,11 @@ main() {
     fi
     log_warning "Skipped: $SKIPPED_TESTS"
     log_info "Duration: ${total_duration}s"
-    log_info "Success Rate: $(( TOTAL_TESTS > 0 ? PASSED_TESTS * 100 / TOTAL_TESTS : 0 ))%"
+    local success_rate=0
+    if [[ $TOTAL_TESTS -gt 0 ]]; then
+        success_rate=$(( PASSED_TESTS * 100 / TOTAL_TESTS ))
+    fi
+    log_info "Success Rate: ${success_rate}%"
 
     if [[ ${#FAILED_TEST_NAMES[@]} -gt 0 ]]; then
         echo
