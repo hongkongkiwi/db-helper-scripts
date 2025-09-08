@@ -194,7 +194,7 @@ jobs:
 
       - name: Create issue for critical findings
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const title = `🔧 Maintenance Issues Found - ${new Date().toISOString().split('T')[0]}`;
