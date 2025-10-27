@@ -186,7 +186,7 @@ jobs:
           EOF
 
       - name: Upload maintenance report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: maintenance-report-${{ github.run_number }}
           path: maintenance-report.md
