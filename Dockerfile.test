@@ -1,7 +1,7 @@
 # Docker image for running database helper script tests
 # This allows running tests without installing dependencies locally
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
